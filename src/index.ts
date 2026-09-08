@@ -1,13 +1,36 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { parseVisualInput, renderRust } from "./rust";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
+const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
+const showUsage = () => !["0", "false", "no", "off"].includes((process.env.PI_VISUAL_CONTEXT_SHOW_USAGE ?? "").toLowerCase());
+const compactNumber = (value: number) => value < 1000 ? String(value) : `${Number((value / 1000).toPrecision(3))}k`;
+const compactCost = (value: number) => `$${value.toFixed(value < 0.1 ? 3 : 2)}`;
+
+function setGeneratedImageDetail(value: unknown, hashes: Set<string>): boolean {
+  if (Array.isArray(value)) return value.reduce((changed, item) => setGeneratedImageDetail(item, hashes), false) || false;
+  if (!value || typeof value !== "object") return false;
+  const object = value as Record<string, unknown>;
+  let changed = false;
+  if (object.type === "input_image" && typeof object.image_url === "string" && object.image_url.startsWith("data:")) {
+    const comma = object.image_url.indexOf(",");
+    const encoded = comma >= 0 ? object.image_url.slice(comma + 1) : "";
+    if (encoded && hashes.has(imageHash(encoded)) && object.detail !== "original") {
+      object.detail = "original";
+      changed = true;
+    }
+  }
+  for (const child of Object.values(object)) changed = setGeneratedImageDetail(child, hashes) || changed;
+  return changed;
+}
 
 export default function (pi: ExtensionAPI) {
   let active: { manifestPath: string; manifest: Record<string, unknown> } | undefined;
   const usage = { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 };
+  const generatedImageHashes = new Set<string>();
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension" || !event.text.startsWith("@v ")) return { action: "continue" };
@@ -30,6 +53,7 @@ export default function (pi: ExtensionAPI) {
         await writeFile(resolve(debugDir, `page-${String(i + 1).padStart(3, "0")}.png`), result.images[i]);
       }
       const manifestPath = resolve(debugDir, "manifest.json");
+      for (const image of result.images) generatedImageHashes.add(imageHash(image));
       const requestManifest = { ...manifest, sourcePath, pages: result.images.map((_, i) => `page-${String(i + 1).padStart(3, "0")}.png`), usage: { ...usage } };
       await writeFile(manifestPath, `${JSON.stringify(requestManifest, null, 2)}\n`);
       active = { manifestPath, manifest: requestManifest };
@@ -46,6 +70,11 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on("before_provider_request", (event, ctx) => {
+    if (ctx.model?.provider !== "openai-codex") return;
+    if (setGeneratedImageDetail(event.payload, generatedImageHashes)) return event.payload;
+  });
+
   pi.on("message_end", async (event) => {
     if (!active || event.message.role !== "assistant") return;
     const message = event.message as any;
@@ -60,10 +89,14 @@ export default function (pi: ExtensionAPI) {
     usage.totalCost += number(u.cost?.total ?? u.cost);
   });
 
-  pi.on("agent_end", async () => {
+  pi.on("agent_end", async (_event, ctx) => {
     if (!active) return;
     const manifest = { ...active.manifest, usage: { ...usage } };
     await writeFile(active.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    if (showUsage()) {
+      const finalUsage = manifest.usage as typeof usage;
+      ctx.ui.notify(`visual-context: ${manifest.pageCount} pages · ${compactNumber(Number(manifest.sourceChars))} chars · ${finalUsage.modelCallCount} call${finalUsage.modelCallCount === 1 ? "" : "s"} · ↑ ${compactNumber(finalUsage.input)} · ↓ ${compactNumber(finalUsage.output)} · R ${compactNumber(finalUsage.cacheRead)} · W ${compactNumber(finalUsage.cacheWrite)} · ${compactCost(finalUsage.totalCost)}`, "info");
+    }
     active = undefined;
   });
 }
