@@ -43,7 +43,7 @@ export default function (pi: ExtensionAPI) {
       status(`${basename(sourcePath)} ${Buffer.byteLength(sourceText)} B / ${sourceText.length} chars`);
       const result = await renderRust(sourcePath, status);
       const { manifest } = result;
-      status(`ready: ${manifest.pageCount} pages, ${manifest.pageWidth}x${manifest.pageHeight}`);
+      status(`ready: ${manifest.pageCount} pages, ${manifest.pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
@@ -57,6 +57,7 @@ export default function (pi: ExtensionAPI) {
       const requestManifest = { ...manifest, sourcePath, pages: result.images.map((_, i) => `page-${String(i + 1).padStart(3, "0")}.png`), usage: { ...usage } };
       await writeFile(manifestPath, `${JSON.stringify(requestManifest, null, 2)}\n`);
       active = { manifestPath, manifest: requestManifest };
+      ctx.ui.setStatus("visual-context", undefined);
       return {
         action: "transform",
         text: `Use the attached visual source context to answer the question.\n\n${question}`, 

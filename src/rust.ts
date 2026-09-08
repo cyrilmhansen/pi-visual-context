@@ -14,13 +14,14 @@ export type RenderManifest = {
   removedChars: number;
   reductionPercent: number;
   pageCount: number;
-  pageWidth: number;
-  pageHeight: number;
-  originalDimensions: { width: number; height: number };
-  croppedDimensions: { width: number; height: number };
-  columnsUsed: number;
-  croppedRightPixels: number;
-  croppedBottomPixels: number;
+  pageDimensions: { width: number; height: number }[];
+  finalPage: {
+    originalDimensions: { width: number; height: number };
+    croppedDimensions: { width: number; height: number };
+    columnsUsed: number;
+    croppedRightPixels: number;
+    croppedBottomPixels: number;
+  };
 };
 
 export function parseVisualInput(text: string): { source: string; question: string } {
@@ -95,6 +96,7 @@ export async function renderRust(sourcePath: string, status: (text: string) => v
     await run("pdftocairo", ["-png", "-r", "1152", pdf, pngPrefix]);
     const rasterPages = (await readdir(work)).filter((name) => /^page-\d+\.png$/.test(name)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
     const images: Buffer[] = [];
+    const pageDimensions: { width: number; height: number }[] = [];
     let finalPage = { width: 1056, height: 960, columnsUsed: 3, croppedRightPixels: 0, croppedBottomPixels: 0 };
     for (let i = 0; i < rasterPages.length; i++) {
       status(`rasterizing ${i + 1}/${rasterPages.length}`);
@@ -107,10 +109,11 @@ export async function renderRust(sourcePath: string, status: (text: string) => v
       if (i === rasterPages.length - 1) {
         finalPage = await cropFinalPage(output);
       }
+      pageDimensions.push({ width: i === rasterPages.length - 1 ? finalPage.width : 1056, height: i === rasterPages.length - 1 ? finalPage.height : 960 });
       images.push(await readFile(output));
     }
     if (images.length !== pageCount) throw new Error(`rasterized ${images.length} pages, expected ${pageCount}`);
-    return { images, manifest: { ...compacted, pageCount, pageWidth: finalPage.width, pageHeight: finalPage.height, originalDimensions: { width: 1056, height: 960 }, croppedDimensions: { width: finalPage.width, height: finalPage.height }, columnsUsed: finalPage.columnsUsed, croppedRightPixels: finalPage.croppedRightPixels, croppedBottomPixels: finalPage.croppedBottomPixels } };
+    return { images, manifest: { ...compacted, pageCount, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: 960 }, croppedDimensions: { width: finalPage.width, height: finalPage.height }, columnsUsed: finalPage.columnsUsed, croppedRightPixels: finalPage.croppedRightPixels, croppedBottomPixels: finalPage.croppedBottomPixels } } };
   } finally {
     await rm(work, { recursive: true, force: true });
   }
