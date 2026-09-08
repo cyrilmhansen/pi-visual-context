@@ -15,13 +15,20 @@
 
 ---
 
-## 0.1 — À terminer maintenant
+## État d’avancement
 
-C’est l’urgence actuelle. Je figerais le scope à :
+Le prototype autonome 0.1 est maintenant implémenté et validé sans appel LLM : build Rust, profils, rendu, crop, en-têtes, artefacts de debug, usage et packaging sont en place.
+
+Le support multifichier de base et les codecs Rust/C sont également implémentés. La navigation par symboles, l’indexation et le cache restent futurs.
+
+## 0.1 — Terminé
+
+Le scope livré est :
 
 ```text
 @v path.rs -- question
 @v --profile conservative path.rs -- question
+@v foo.h foo.c -- question
 ```
 
 avec les profils suivants :
@@ -42,35 +49,27 @@ conservative
 
 ### Fonctionnalités déjà acquises
 
-- Rust `strip-lex`
+- Rust `strip-lex` et codec lexical C
 - rendu Typst
 - pages PNG
 - recadrage de la dernière page
 - en-tête visuel
+- support multifichier dans un même message
 - `detail=original` sélectif
 - `ImageContent` Pi
 - persistance de conversation Pi
 - artefacts de debug
 - usage par requête `@v`
 
-Avant de déclarer la version 0.1, il reste essentiellement à :
-
-- rendre le helper Rust complètement local au repo ;
-- ajouter le script de build et de release ;
-- ajouter des tests simples ;
-- éliminer les chemins absolus inutiles ;
-- documenter la dépendance Romulus ;
-- vérifier `npm pack --dry-run`.
-
-Je ne rajouterais aucune fonctionnalité avant ce jalon.
+Ces éléments sont désormais terminés. Le prochain travail porte sur l’usage réel du système, pas sur de nouveaux benchmarks.
 
 ---
 
-## 0.2 — Résoudre la distribution
+## 0.2 — Distribution et usage réel
 
-Le principal sujet sera Romulus.
+La distribution de base est maintenant résolue : Romulus est embarqué avec son attribution, le helper Rust/C est fourni en source et les scripts de build/package sont présents.
 
-Trois possibilités, par ordre de préférence :
+Les binaires précompilés restent hors scope. Trois possibilités restent envisageables pour de futures distributions multiplateformes, par ordre de préférence :
 
 1. licence compatible → inclure Romulus ;
 2. licence non redistribuable → demander à l’utilisateur de fournir la police ;
@@ -134,9 +133,11 @@ C’est là qu’on étudiera proprement le cache de conversation de Pi.
 
 ---
 
-## 0.4 — Plusieurs fichiers et navigation
+## 0.4 — Navigation visuelle
 
-L’interface naturelle pourrait évoluer vers :
+Le support multifichier de base est terminé : plusieurs fichiers `.rs`, `.c` et `.h` peuvent être rendus indépendamment dans un seul message, dans l’ordre fourni.
+
+La navigation par index reste à construire. L’interface naturelle pourrait évoluer vers :
 
 ```text
 @v src/foo.rs src/bar.rs -- question

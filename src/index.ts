@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename, resolve } from "node:path";
-import { parseVisualInput, renderRust } from "./rust";
+import { basename, extname, resolve } from "node:path";
+import { parseVisualInput, renderC, renderRust } from "./rust";
 import { getVisualProfile } from "./profile";
+import { buildRequestManifest } from "./manifest";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -37,33 +38,50 @@ export default function (pi: ExtensionAPI) {
     if (event.source === "extension" || !event.text.startsWith("@v ")) return { action: "continue" };
     const status = (text: string) => ctx.ui.setStatus("visual-context", `visual-context: ${text}`);
     try {
-      const { source, question, profile: profileName } = parseVisualInput(event.text);
+      const { sources, question, profile: profileName } = parseVisualInput(event.text);
       const profile = getVisualProfile(profileName);
-      const sourcePath = resolve(ctx.cwd, source);
-      try { await access(sourcePath); } catch { throw new Error(`source file does not exist: ${source}`); }
-      const sourceText = await readFile(sourcePath, "utf8");
-      status(`${basename(sourcePath)} ${Buffer.byteLength(sourceText)} B / ${sourceText.length} chars`);
-      const result = await renderRust(sourcePath, status, profile);
-      const { manifest } = result;
-      status(`ready: ${manifest.pageCount} pages, ${manifest.pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
+      const sourcePaths = sources.map((source) => resolve(ctx.cwd, source));
+      for (let i = 0; i < sourcePaths.length; i++) {
+        try { await access(sourcePaths[i]); } catch { throw new Error(`source file does not exist: ${sources[i]}`); }
+      }
+      const rendered = [] as Array<{ path: string; result: Awaited<ReturnType<typeof renderRust>> }>;
+      for (const sourcePath of sourcePaths) {
+        const sourceText = await readFile(sourcePath, "utf8");
+        status(`${basename(sourcePath)} ${Buffer.byteLength(sourceText)} B / ${sourceText.length} chars`);
+        const extension = extname(sourcePath).toLowerCase();
+        const result = extension === ".rs"
+          ? await renderRust(sourcePath, status, profile)
+          : await renderC(sourcePath, status, profile);
+        rendered.push({ path: sourcePath, result });
+      }
+      const images = rendered.flatMap(({ result }) => result.images);
+      const pageDimensions = rendered.flatMap(({ result }) => result.manifest.pageDimensions);
+      status(`ready: ${images.length} pages, ${pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
-      const debugDir = resolve(ctx.cwd, ".pi", "visual-context", `${stamp}-${basename(sourcePath, ".rs")}`);
+      const firstBase = basename(sourcePaths[0], extname(sourcePaths[0]));
+      const debugName = sources.length === 1 ? firstBase : `${firstBase}-multi`;
+      const debugDir = resolve(ctx.cwd, ".pi", "visual-context", `${stamp}-${debugName}`);
       await mkdir(debugDir, { recursive: true });
-      for (let i = 0; i < result.images.length; i++) {
-        await writeFile(resolve(debugDir, `page-${String(i + 1).padStart(3, "0")}.png`), result.images[i]);
+      const pageFilesBySource: string[][] = [];
+      let pageOffset = 0;
+      for (const item of rendered) {
+        const pageFiles = item.result.images.map((_, index) => `page-${String(pageOffset + index + 1).padStart(3, "0")}.png`);
+        for (let i = 0; i < item.result.images.length; i++) await writeFile(resolve(debugDir, pageFiles[i]), item.result.images[i]);
+        pageOffset += item.result.images.length;
+        pageFilesBySource.push(pageFiles);
       }
+      for (const image of images) generatedImageHashes.add(imageHash(image));
+      const requestManifest = buildRequestManifest(rendered.map((item) => ({ path: item.path, manifest: item.result.manifest })), pageFilesBySource, profile, { ...usage });
       const manifestPath = resolve(debugDir, "manifest.json");
-      for (const image of result.images) generatedImageHashes.add(imageHash(image));
-      const requestManifest = { ...manifest, sourcePath, pages: result.images.map((_, i) => `page-${String(i + 1).padStart(3, "0")}.png`), usage: { ...usage } };
       await writeFile(manifestPath, `${JSON.stringify(requestManifest, null, 2)}\n`);
       active = { manifestPath, manifest: requestManifest };
       ctx.ui.setStatus("visual-context", undefined);
       return {
         action: "transform",
-        text: `Use the attached visual source context to answer the question.\n\n${question}`, 
-        images: [...(event.images ?? []), ...result.images.map((data) => ({ type: "image" as const, data: data.toString("base64"), mimeType: "image/png" as const }))],
+        text: `Use the attached visual source context to answer the question.\n\n${question}`,
+        images: [...(event.images ?? []), ...images.map((data) => ({ type: "image" as const, data: data.toString("base64"), mimeType: "image/png" as const }))],
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -98,7 +116,7 @@ export default function (pi: ExtensionAPI) {
     await writeFile(active.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
     if (showUsage()) {
       const finalUsage = manifest.usage as typeof usage;
-      ctx.ui.notify(`visual-context: ${manifest.pageCount} pages · ${compactNumber(Number(manifest.sourceChars))} chars · ${finalUsage.modelCallCount} call${finalUsage.modelCallCount === 1 ? "" : "s"} · ↑ ${compactNumber(finalUsage.input)} · ↓ ${compactNumber(finalUsage.output)} · R ${compactNumber(finalUsage.cacheRead)} · W ${compactNumber(finalUsage.cacheWrite)} · ${compactCost(finalUsage.totalCost)}`, "info");
+      ctx.ui.notify(`visual-context: ${manifest.pageCount} pages · ${compactNumber(Number(manifest.globalMetrics ? (manifest.globalMetrics as any).sourceChars : manifest.sourceChars))} chars · ${finalUsage.modelCallCount} call${finalUsage.modelCallCount === 1 ? "" : "s"} · ↑ ${compactNumber(finalUsage.input)} · ↓ ${compactNumber(finalUsage.output)} · R ${compactNumber(finalUsage.cacheRead)} · W ${compactNumber(finalUsage.cacheWrite)} · ${compactCost(finalUsage.totalCost)}`, "info");
     }
     active = undefined;
   });

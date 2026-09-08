@@ -16,6 +16,7 @@ export type RenderManifest = {
   reductionPercent: number;
   pageCount: number;
   profile: VisualProfile;
+  language: "Rust" | "C";
   pageDimensions: { width: number; height: number }[];
   finalPage: {
     originalDimensions: { width: number; height: number };
@@ -26,7 +27,7 @@ export type RenderManifest = {
   };
 };
 
-export function parseVisualInput(text: string): { source: string; question: string; profile: string } {
+export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string } {
   if (!text.startsWith("@v ")) throw new Error("not a visual-context input");
   let rest = text.slice(3);
   let profile = "normal";
@@ -38,11 +39,14 @@ export function parseVisualInput(text: string): { source: string; question: stri
   }
   const separator = rest.indexOf(" -- ");
   if (separator < 0) throw new Error("malformed @v syntax; use: @v <rust-source-path> -- <question>");
-  const source = rest.slice(0, separator).trim();
+  const sourceText = rest.slice(0, separator).trim();
   const question = rest.slice(separator + 4).trim();
-  if (!source || !question) throw new Error("malformed @v syntax; both source path and question are required");
-  if (!source.endsWith(".rs")) throw new Error("@v currently accepts Rust .rs files only");
-  return { source, question, profile };
+  const sources = sourceText ? sourceText.split(/\s+/) : [];
+  if (!sources.length || !question) throw new Error("malformed @v syntax; source paths and question are required");
+  for (const source of sources) {
+    if (!/\.(rs|c|h)$/.test(source)) throw new Error(`unsupported source extension for "${source}"; supported extensions are .rs, .c, and .h`);
+  }
+  return { source: sources[0], sources, question, profile };
 }
 
 async function trimGeometry(path: string, crop: string) {
@@ -53,7 +57,7 @@ async function trimGeometry(path: string, crop: string) {
 
 const HEADER_HEIGHT = 20;
 
-async function cropFinalPage(path: string, profile: VisualProfile) {
+export async function cropFinalPage(path: string, profile: VisualProfile) {
   const columnWidth = (1056 - 2 * profile.sideMargin - (profile.columns - 1) * profile.gutter) / profile.columns;
   const columns = await Promise.all(Array.from({ length: profile.columns }, (_, index) => trimGeometry(path, `${columnWidth}x960+${profile.sideMargin + index * (columnWidth + profile.gutter)}+${HEADER_HEIGHT}`)));
   const columnsUsed = columns[2].nonWhite ? 3 : columns[1].nonWhite ? 2 : 1;
@@ -72,8 +76,25 @@ async function cropFinalPage(path: string, profile: VisualProfile) {
   return { width, height, columnsUsed, croppedRightPixels: 1056 - width, croppedBottomPixels: HEADER_HEIGHT + 960 - height };
 }
 
-async function addHeader(path: string, page: number, total: number, sourceName: string, profile: VisualProfile) {
-  const text = page === 1 ? `Rust | ${sourceName} | visual-context | ${page}/${total} | ${profile.name}` : `${sourceName} | ${page}/${total}`;
+async function compactC(sourcePath: string, outDir: string, status: (text: string) => void): Promise<Compacted> {
+  const source = await readFile(sourcePath, "utf8");
+  const output = resolve(outDir, "source.txt");
+  status(`compacting ${source.length} -> ... chars`);
+  const binary = resolve(root, "tools/c-strip-lex/target/release/c-strip-lex");
+  const font = resolve(root, "assets/fonts/romulus/Romulus.ttf");
+  try { await access(binary); } catch { throw new Error(`C helper is unavailable at ${binary}; run: npm run build:c`); }
+  const { stdout } = await run(binary, [sourcePath, output, font], { cwd: root });
+  const match = stdout.match(/encoded visible chars=(\d+)/);
+  if (!match) throw new Error("C strip-lex did not report its encoded character count");
+  const encodedChars = Number(match[1]);
+  const removedChars = source.length - encodedChars;
+  const reductionPercent = source.length ? (removedChars / source.length) * 100 : 0;
+  status(`compacting ${source.length} -> ${encodedChars} chars (-${reductionPercent.toFixed(1)}%)`);
+  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
+}
+
+async function addHeader(path: string, page: number, total: number, sourceName: string, profile: VisualProfile, language: "Rust" | "C") {
+  const text = page === 1 ? `${language} | ${sourceName} | visual-context | ${page}/${total} | ${profile.name}` : `${sourceName} | ${page}/${total}`;
   const font = resolve(root, "assets/fonts/romulus/Romulus.ttf");
   const output = `${path}.header.png`;
   await run("magick", [path, "-gravity", "NorthWest", "-background", "white", "-splice", `0x${HEADER_HEIGHT}`, "-font", font, "-fill", "black", "-pointsize", "10", "-annotate", "+12+4", text, output]);
@@ -81,7 +102,9 @@ async function addHeader(path: string, page: number, total: number, sourceName: 
   await run("mv", [output, path]);
 }
 
-async function compactRust(sourcePath: string, outDir: string, status: (text: string) => void) {
+type Compacted = { output: string; sourceBytes: number; sourceChars: number; encodedChars: number; removedChars: number; reductionPercent: number };
+
+async function compactRust(sourcePath: string, outDir: string, status: (text: string) => void): Promise<Compacted> {
   const source = await readFile(sourcePath, "utf8");
   const output = resolve(outDir, "source.txt");
   status(`compacting ${source.length} -> ... chars`);
@@ -103,10 +126,10 @@ async function compactRust(sourcePath: string, outDir: string, status: (text: st
   return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
 }
 
-export async function renderRust(sourcePath: string, status: (text: string) => void, profile: VisualProfile): Promise<{ images: Buffer[]; manifest: RenderManifest }> {
+async function renderSource(sourcePath: string, status: (text: string) => void, profile: VisualProfile, language: "Rust" | "C"): Promise<{ images: Buffer[]; manifest: RenderManifest }> {
   const work = await mkdtemp(resolve(root, ".pi-visual-context-"));
   try {
-    const compacted = await compactRust(sourcePath, work, status);
+    const compacted = language === "Rust" ? await compactRust(sourcePath, work, status) : await compactC(sourcePath, work, status);
     const pdf = resolve(work, "source.pdf");
     const pngPrefix = resolve(work, "page");
     const fontDir = resolve(root, "assets/fonts/romulus");
@@ -129,14 +152,22 @@ export async function renderRust(sourcePath: string, status: (text: string) => v
       await rm(input);
       const { stdout: size } = await run("identify", ["-format", "%wx%h", output]);
       if (size.trim() !== "1056x960") throw new Error(`renderer produced ${size.trim()}, expected 1056x960`);
-      await addHeader(output, i + 1, rasterPages.length, basename(sourcePath), profile);
+      await addHeader(output, i + 1, rasterPages.length, basename(sourcePath), profile, language);
       if (i === rasterPages.length - 1) finalPage = await cropFinalPage(output, profile);
       pageDimensions.push({ width: i === rasterPages.length - 1 ? finalPage.width : 1056, height: i === rasterPages.length - 1 ? finalPage.height : HEADER_HEIGHT + 960 });
       images.push(await readFile(output));
     }
     if (images.length !== pageCount) throw new Error(`rasterized ${images.length} pages, expected ${pageCount}`);
-    return { images, manifest: { ...compacted, profile, pageCount, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: finalPage.width, height: finalPage.height }, columnsUsed: finalPage.columnsUsed, croppedRightPixels: finalPage.croppedRightPixels, croppedBottomPixels: finalPage.croppedBottomPixels } } };
+    return { images, manifest: { ...compacted, profile, language, pageCount, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: finalPage.width, height: finalPage.height }, columnsUsed: finalPage.columnsUsed, croppedRightPixels: finalPage.croppedRightPixels, croppedBottomPixels: finalPage.croppedBottomPixels } } };
   } finally {
     await rm(work, { recursive: true, force: true });
   }
+}
+
+export function renderRust(sourcePath: string, status: (text: string) => void, profile: VisualProfile) {
+  return renderSource(sourcePath, status, profile, "Rust");
+}
+
+export function renderC(sourcePath: string, status: (text: string) => void, profile: VisualProfile) {
+  return renderSource(sourcePath, status, profile, "C");
 }

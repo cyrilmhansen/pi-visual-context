@@ -1,0 +1,10 @@
+.git/
+.pi/
+.pi-visual-context-*
+node_modules/
+tools/rust-strip-lex/target/
+tools/c-strip-lex/target/
+*.png
+*.pdf
+runs/
+corpora/

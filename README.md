@@ -6,7 +6,7 @@ The core idea is simple:
 
 > Instead of sending large source files only as text tokens, render a compact symbolic view of the source as an image and attach that image to the conversation.
 
-This repository explores that idea first for Rust source code.
+This repository currently supports Rust and C source code.
 
 ## Motivation
 
@@ -16,7 +16,7 @@ In early experiments with GPT-6 Astra, a compact Romulus-based rendering preserv
 
 The current prototype uses:
 
-- Rust lexical compaction
+- Rust and C lexical compaction
 - explicit line-break markers
 - dense multi-column layout
 - Romulus bitmap-inspired typography
@@ -99,14 +99,16 @@ The extension accepts:
 ```text
 @v src/parser.rs -- Explain the architecture.
 @v --profile conservative src/parser.rs -- Explain the architecture.
+@v src/foo.rs src/bar.rs -- Explain how these modules interact.
+@v external/opl3/opl3.h external/opl3/opl3.c -- Explain how this API works.
 ```
 
 Conceptually:
 
 ```text
-Rust source
+Rust or C source
     ↓
-lexical compaction
+language-specific lexical compaction
     ↓
 visual encoding
     ↓
@@ -119,7 +121,7 @@ Pi ImageContent attachment(s)
 
 Pi will then persist the images as part of the conversation session.
 
-Build the local Rust helper once before use:
+Build the local Rust and C helpers once before use:
 
 ```bash
 npm run build:rust
@@ -127,16 +129,17 @@ npm run build:rust
 
 ## Project status
 
-First release candidate; intentionally narrow and Rust-only.
+First release candidate; intentionally narrow.
 
 Current scope:
 
 - `@v` Pi input transformation
-- Rust source codec and visual rendering
+- Rust and C source codecs
+- `.rs`, `.c`, and `.h` inputs
+- ordered multifile PNG attachments and debug manifests
 - normal and conservative rendering profiles
-- ordered PNG attachments and debug manifests
 
-Other languages, indexing, and archive features are out of scope for this release candidate.
+The C codec is lexical only: it does not preprocess, expand macros, reformat, or rewrite C. Comments, directives, macros, strings, characters, and significant newlines are preserved. Other languages, indexing, and archive features remain out of scope.
 
 ## Requirements
 
@@ -147,7 +150,7 @@ The current prototype pipeline expects:
 - Typst
 - Poppler (`pdftocairo`, `pdftotext`)
 - ImageMagick
-- Rust tooling for lexical processing
+- Rust tooling for the Rust and C lexical helpers
 
 Romulus is bundled at `assets/fonts/romulus/Romulus.ttf`.
 

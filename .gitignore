@@ -1,8 +1,12 @@
 node_modules/
 dist/
+external/
 tools/rust-strip-lex/target/
 .pi/
 .pi-visual-context-cache/
 *.png
 *.pdf
 .DS_Store
+
+# Rust build artifacts
+tools/*/target/
