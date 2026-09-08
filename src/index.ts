@@ -1,10 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, extname, resolve } from "node:path";
-import { parseVisualInput, renderC, renderRust } from "./rust";
+import { parseVisualInput, renderSources, RenderCancelled } from "./rust";
 import { getVisualProfile } from "./profile";
-import { buildRequestManifest } from "./manifest";
+import { buildContinuousRequestManifest } from "./manifest";
+import { displaySourcePaths, expandSourcePatterns } from "./sources";
+import { confirmFileBudget, confirmTabletBudget, maxTabletsFromEnvironment } from "./policy";
+import { openPreview } from "./preview";
+import { registerVisualContextCommand } from "./command";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -34,28 +38,32 @@ export default function (pi: ExtensionAPI) {
   const usage = { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 };
   const generatedImageHashes = new Set<string>();
 
+  registerVisualContextCommand(pi);
+
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension" || !event.text.startsWith("@v ")) return { action: "continue" };
+    ctx.ui.setWidget("visual-context-help", undefined);
     const status = (text: string) => ctx.ui.setStatus("visual-context", `visual-context: ${text}`);
     try {
-      const { sources, question, profile: profileName } = parseVisualInput(event.text);
+      const { sources, question, profile: profileName, render: preview, open } = parseVisualInput(event.text);
       const profile = getVisualProfile(profileName);
-      const sourcePaths = sources.map((source) => resolve(ctx.cwd, source));
-      for (let i = 0; i < sourcePaths.length; i++) {
-        try { await access(sourcePaths[i]); } catch { throw new Error(`source file does not exist: ${sources[i]}`); }
+      const sourcePaths = await expandSourcePatterns(sources, ctx.cwd);
+      if (!await confirmFileBudget(ctx.ui, sourcePaths.length)) {
+        ctx.ui.setStatus("visual-context", undefined);
+        return { action: "handled" };
       }
-      const rendered = [] as Array<{ path: string; result: Awaited<ReturnType<typeof renderRust>> }>;
-      for (const sourcePath of sourcePaths) {
-        const sourceText = await readFile(sourcePath, "utf8");
-        status(`${basename(sourcePath)} ${Buffer.byteLength(sourceText)} B / ${sourceText.length} chars`);
+      const displayPaths = displaySourcePaths(sourcePaths, ctx.cwd);
+      const renderInputs = sourcePaths.map((sourcePath, index) => {
         const extension = extname(sourcePath).toLowerCase();
-        const result = extension === ".rs"
-          ? await renderRust(sourcePath, status, profile)
-          : await renderC(sourcePath, status, profile);
-        rendered.push({ path: sourcePath, result });
-      }
-      const images = rendered.flatMap(({ result }) => result.images);
-      const pageDimensions = rendered.flatMap(({ result }) => result.manifest.pageDimensions);
+        const language = extension === ".rs" ? "Rust" as const : extension === ".py" ? "Python" as const : [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"].includes(extension) ? "C" as const : undefined;
+        if (!language) throw new Error(`unsupported source extension: ${extension}`);
+        return { path: sourcePath, displayPath: displayPaths[index], language };
+      });
+      const rendered = await renderSources(renderInputs, status, profile, {
+        beforeRasterize: async (tabletCount, sourceChars) => confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
+      });
+      const images = rendered.images;
+      const pageDimensions = rendered.manifest.pageDimensions;
       status(`ready: ${images.length} pages, ${pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
       const now = new Date();
@@ -64,18 +72,19 @@ export default function (pi: ExtensionAPI) {
       const debugName = sources.length === 1 ? firstBase : `${firstBase}-multi`;
       const debugDir = resolve(ctx.cwd, ".pi", "visual-context", `${stamp}-${debugName}`);
       await mkdir(debugDir, { recursive: true });
-      const pageFilesBySource: string[][] = [];
-      let pageOffset = 0;
-      for (const item of rendered) {
-        const pageFiles = item.result.images.map((_, index) => `page-${String(pageOffset + index + 1).padStart(3, "0")}.png`);
-        for (let i = 0; i < item.result.images.length; i++) await writeFile(resolve(debugDir, pageFiles[i]), item.result.images[i]);
-        pageOffset += item.result.images.length;
-        pageFilesBySource.push(pageFiles);
-      }
+      const pageFiles = images.map((_, index) => `page-${String(index + 1).padStart(3, "0")}.png`);
+      for (let index = 0; index < images.length; index++) await writeFile(resolve(debugDir, pageFiles[index]), images[index]);
       for (const image of images) generatedImageHashes.add(imageHash(image));
-      const requestManifest = buildRequestManifest(rendered.map((item) => ({ path: item.path, manifest: item.result.manifest })), pageFilesBySource, profile, { ...usage });
+      const requestManifest = buildContinuousRequestManifest(rendered.sourceManifests, pageFiles, rendered.manifest, { ...usage });
       const manifestPath = resolve(debugDir, "manifest.json");
       await writeFile(manifestPath, `${JSON.stringify(requestManifest, null, 2)}\n`);
+      const sourceChars = rendered.manifest.sourceChars;
+      if (preview) {
+        ctx.ui.setStatus("visual-context", undefined);
+        ctx.ui.notify(`visual-context preview: ${sourcePaths.length} files · ${compactNumber(images.length)} tablets · ${compactNumber(sourceChars)} chars\n${debugDir}`, "info");
+        if (open) await openPreview(debugDir);
+        return { action: "handled" };
+      }
       active = { manifestPath, manifest: requestManifest };
       ctx.ui.setStatus("visual-context", undefined);
       return {
@@ -84,6 +93,10 @@ export default function (pi: ExtensionAPI) {
         images: [...(event.images ?? []), ...images.map((data) => ({ type: "image" as const, data: data.toString("base64"), mimeType: "image/png" as const }))],
       };
     } catch (error) {
+      if (error instanceof RenderCancelled) {
+        ctx.ui.setStatus("visual-context", undefined);
+        return { action: "handled" };
+      }
       const message = error instanceof Error ? error.message : String(error);
       status(`failed: ${message}`);
       ctx.ui.notify(`@v failed: ${message}`, "error");

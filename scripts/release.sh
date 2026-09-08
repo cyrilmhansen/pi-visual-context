@@ -16,6 +16,7 @@ fi
 
 cargo test --manifest-path tools/rust-strip-lex/Cargo.toml
 cargo test --manifest-path tools/c-strip-lex/Cargo.toml
+cargo test --manifest-path tools/python-strip-lex/Cargo.toml
 npm run build:rust
 if node -e 'const p=require("./package.json"); process.exit(p.scripts?.test ? 0 : 1)' 2>/dev/null; then
   npm test

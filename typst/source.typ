@@ -6,6 +6,7 @@
 #let side-margin = float(sys.inputs.at("margin", default: "12")) * 1pt
 #let gutter-width = float(sys.inputs.at("gutter", default: "24")) * 1pt
 #let source-file = sys.inputs.at("source")
+#let banner-prefix = "__PI_VISUAL_CONTEXT_FILE__:"
 
 #set page(
   width: 1056pt,
@@ -23,4 +24,26 @@
   hyphenate: false,
 )
 #set par(leading: leading, justify: false)
-#columns(ncols, gutter: gutter-width)[#text(read(source-file))]
+#let render-line(content) = {
+  if content.starts-with(banner-prefix) {
+    let name = content.slice(banner-prefix.len())
+    block(width: 100%, above: 2pt, below: 2pt)[
+      #grid(
+        columns: (1fr, auto, 1fr),
+        gutter: 4pt,
+        align: horizon,
+        [#line(length: 100%, stroke: .45pt)],
+        text(name, size: font-size, weight: "bold"),
+        [#line(length: 100%, stroke: .45pt)],
+      )
+    ]
+  } else {
+    text(content)
+    linebreak()
+  }
+}
+#columns(ncols, gutter: gutter-width)[
+  #for content in read(source-file).split("\n") {
+    render-line(content)
+  }
+]

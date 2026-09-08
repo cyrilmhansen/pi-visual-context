@@ -4,6 +4,7 @@
 node_modules/
 tools/rust-strip-lex/target/
 tools/c-strip-lex/target/
+tools/python-strip-lex/target/
 *.png
 *.pdf
 runs/

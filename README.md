@@ -6,7 +6,7 @@ The core idea is simple:
 
 > Instead of sending large source files only as text tokens, render a compact symbolic view of the source as an image and attach that image to the conversation.
 
-This repository currently supports Rust and C source code.
+This repository currently supports Rust, C, and Python source code.
 
 ## Motivation
 
@@ -16,8 +16,8 @@ In early experiments with GPT-6 Astra, a compact Romulus-based rendering preserv
 
 The current prototype uses:
 
-- Rust and C lexical compaction
-- explicit line-break markers
+- Rust, C, and dense Python lexical compaction
+- explicit line-break markers and logical-depth markers
 - dense multi-column layout
 - Romulus bitmap-inspired typography
 - supersampled antialiased rasterization
@@ -94,12 +94,21 @@ The long-term idea is to treat visual context as a symbolic representation layer
 
 ## Pi integration
 
+The local `/visual-context` command shows the compact usage summary and does not render or call a model. The work interface remains `@v`:
+
+```text
+/visual-context
+```
+
 The extension accepts:
 
 ```text
 @v src/parser.rs -- Explain the architecture.
 @v --profile conservative src/parser.rs -- Explain the architecture.
 @v src/foo.rs src/bar.rs -- Explain how these modules interact.
+@v src/**/*.py helper.rs -- Explain how these components interact.
+@v --render --profile conservative src/**/*.py
+@v --render --open src/**/*.py
 @v external/opl3/opl3.h external/opl3/opl3.c -- Explain how this API works.
 ```
 
@@ -119,7 +128,7 @@ PNG page(s)
 Pi ImageContent attachment(s)
 ```
 
-Pi will then persist the images as part of the conversation session.
+Pi will then persist the images as part of the conversation session. Multiple files are compacted into one continuous Typst document with compact centered graphical transition bands. `--render` runs the same pipeline but stops after writing the PNGs and manifest, without calling a model; `--open` additionally opens the first PNG when a native viewer is available.
 
 Build the local Rust and C helpers once before use:
 
@@ -134,12 +143,16 @@ First release candidate; intentionally narrow.
 Current scope:
 
 - `@v` Pi input transformation
-- Rust and C source codecs
-- `.rs`, `.c`, and `.h` inputs
+- Rust, C, and Python source codecs
+- `.rs`, `.c`, `.h`, and `.py` inputs, including deterministic `*` and `**` globs
+- glob results sorted lexically, deduplicated, and restricted to regular files
 - ordered multifile PNG attachments and debug manifests
+- `@v --render` preview mode, with optional `--open` and no model call
+- continuous multifile rendering with global tablet headers
+- file-count confirmation via `PI_VISUAL_CONTEXT_CONFIRM_FILES` (default 20) before compacting, and tablet confirmation via `PI_VISUAL_CONTEXT_MAX_TABLETS` (default 10) after PDF layout and before rasterization
 - normal and conservative rendering profiles
 
-The C codec is lexical only: it does not preprocess, expand macros, reformat, or rewrite C. Comments, directives, macros, strings, characters, and significant newlines are preserved. Other languages, indexing, and archive features remain out of scope.
+Source patterns preserve argument order; each glob is sorted lexically, duplicates are removed at first occurrence, and a glob with no regular-file matches is an error. Python uses `¶` for logical line breaks, including LF characters inside multiline strings, and `N»` for logical indentation depth (`»` is the bundled-font equivalent of `⇥`); continuation indentation is omitted. Literal `\\n` sequences remain unchanged. The C and Python codecs are lexical only: they do not preprocess, expand macros, reformat, or rewrite source. Comments, directives, macros, strings, characters, indentation, and significant newlines are preserved. Other languages, indexing, and archive features remain out of scope.
 
 ## Requirements
 
