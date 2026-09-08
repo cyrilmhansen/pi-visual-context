@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { cropFinalPage, FILE_BANNER_PREFIX, formatFileBanner, parseVisualInput, RenderCancelled, renderSources } from "../src/rust.ts";
+import { classifyRenderedText, cropFinalPage, FILE_BANNER_PREFIX, formatFileBanner, mapPages, parseVisualInput, rasterWorkerCount, RenderCancelled, renderSources } from "../src/rust.ts";
 import { buildContinuousRequestManifest, buildRequestManifest } from "../src/manifest.ts";
 import { getVisualProfile } from "../src/profile.ts";
 import { displaySourcePaths, expandSourcePatterns } from "../src/sources.ts";
@@ -12,6 +12,7 @@ import { confirmFileBudget, confirmTabletBudget, fileConfirmationMessage, maxTab
 import { openPreview } from "../src/preview.ts";
 import { VISUAL_CONTEXT_HELP } from "../src/help.ts";
 import { registerVisualContextCommand } from "../src/command.ts";
+import { collectGitProvenance } from "../src/git.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -47,6 +48,21 @@ test("bundled Romulus contains all Python structural glyphs", () => {
     const codepoint = glyph.codePointAt(0);
     assert.ok(ranges.some(([start, end]) => codepoint >= start && codepoint <= end), `${glyph} missing from Romulus cmap`);
   }
+});
+
+test("classifies rendered glyphs from the Romulus cmap", () => {
+  const charset = execFileSync("fc-query", ["--format=%{charset}", font], { encoding: "utf8" });
+  const codepoints = new Set();
+  for (const range of charset.trim().split(/\s+/)) {
+    const [startText, endText = startText] = range.split("-");
+    for (let codepoint = parseInt(startText, 16); codepoint <= parseInt(endText, 16); codepoint++) codepoints.add(codepoint);
+  }
+  assert.equal(classifyRenderedText("français é è à ç œ ¶ ¤ »", "latin.py", codepoints).fallbackRequired, false);
+  for (const text of ["α β Δ λ", "Ж Д Я", "日本語のテスト", "😀 🚀 ✅ ⚠️ 🔒 🧪", "≠ ≤ ≥ ≈ ∞ ∑ √", "→ ← ↑ ↓ ⇒ ⇥ ␉ ␍ ␊"]) {
+    assert.equal(classifyRenderedText(text, "source.py", codepoints).fallbackRequired, true, text);
+  }
+  assert.equal(classifyRenderedText(String.fromCharCode(9, 13, 10) + "¶ ¤ »", "source.py", codepoints).fallbackRequired, false);
+  assert.equal(classifyRenderedText("ASCII", "日本.py", codepoints).fallbackRequired, true);
 });
 
 test("parses mono-file input and preserves question separator", () => {
@@ -181,6 +197,20 @@ test("Python codec handles the bundled fixture and is deterministic", () => {
   assert.match(readFileSync(one, "utf8"), /\u200b/);
 });
 
+test("Unicode fixture retains fallback text and real line controls", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-unicode-codec-test-"));
+  const source = join(root, "tests/fixtures/unicode.py");
+  const output = join(dir, "unicode.txt");
+  execFileSync(pythonHelper, [source, output, font]);
+  const encoded = readFileSync(output, "utf8").replaceAll("\u200b", "");
+  assert.match(encoded, /français/);
+  assert.match(encoded, /日本語のテスト/);
+  assert.match(encoded, /😀 🚀 ✅/);
+  assert.match(encoded, /≠ ≤ ≥/);
+  assert.equal(encoded.includes("\r"), false);
+  assert.equal(encoded.includes("\n"), false);
+});
+
 test("Python codec densely encodes logical depth, blank lines, and continuations", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-visual-python-dense-test-"));
   const source = join(dir, "dense.py");
@@ -234,7 +264,7 @@ test("tablet confirmation can cancel after PDF layout before rasterization", asy
   const source = join(dir, "small.py");
   writeFileSync(source, "value = 1\n");
   const statuses = [];
-  await assert.rejects(() => renderSources([{ path: source, displayPath: "small.py", language: "Python" }], (status) => statuses.push(status), getVisualProfile("normal"), { beforeRasterize: async () => false }), RenderCancelled);
+  await assert.rejects(() => renderSources([{ path: source, displayPath: "small.py", language: "Python" }], (status) => statuses.push(status), getVisualProfile("normal"), { cacheDirectory: join(dir, "cache"), beforeRasterize: async () => false }), RenderCancelled);
   assert.ok(statuses.some((status) => status === "PDF ready: 1 tablets"));
   assert.equal(statuses.some((status) => status.startsWith("rasterizing")), false);
 });
@@ -252,20 +282,198 @@ test("continuous renderer combines files and reports global progress", async () 
   writeFileSync(first, "def first():\n    return 1\n");
   writeFileSync(second, "int second(void) { return 2; }\n");
   const statuses = [];
+  const cacheDirectory = join(dir, "cache");
   const rendered = await renderSources([
     { path: first, displayPath: "first.py", language: "Python" },
     { path: second, displayPath: "second.c", language: "C" },
-  ], (status) => statuses.push(status), getVisualProfile("normal"));
+  ], (status) => statuses.push(status), getVisualProfile("normal"), { cacheDirectory });
   assert.equal(rendered.manifest.language, "Mixed");
   assert.equal(rendered.sourceManifests.length, 2);
   assert.equal(rendered.manifest.pageCount, rendered.images.length);
-  assert.ok(statuses.includes("laying out 2 files"));
+  assert.ok(statuses.some((status) => status.startsWith("laying out 2 files")));
   assert.ok(statuses.some((status) => status.startsWith("rasterizing 1/")));
   const preview = await renderSources([
     { path: first, displayPath: "first.py", language: "Python" },
     { path: second, displayPath: "second.c", language: "C" },
-  ], () => {}, getVisualProfile("normal"));
+  ], () => {}, getVisualProfile("normal"), { cacheDirectory });
   assert.deepEqual(preview.images, rendered.images);
+});
+
+test("mixed Unicode sources render normal before conservative groups", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-unicode-groups-test-"));
+  const ascii = join(dir, "ascii.py");
+  const latin = join(dir, "latin.py");
+  const japanese = join(dir, "japanese.py");
+  writeFileSync(ascii, "message = 'plain ASCII'\n");
+  writeFileSync(latin, "message = 'français é è à ç œ'\n");
+  writeFileSync(japanese, "message = '日本語のテスト 😀 🚀'\n");
+  const inputs = [
+    { path: ascii, displayPath: "ascii.py", language: "Python" },
+    { path: latin, displayPath: "latin.py", language: "Python" },
+    { path: japanese, displayPath: "japanese.py", language: "Python" },
+  ];
+  const first = await renderSources(inputs, () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache") });
+  assert.equal(first.manifest.requestedProfile, "normal");
+  assert.deepEqual(first.manifest.renderGroups.map((group) => [group.profile, group.reason, group.sources]), [
+    ["normal", "romulus-compatible", ["ascii.py", "latin.py"]],
+    ["conservative", "font-fallback", ["japanese.py"]],
+  ]);
+  assert.equal(first.manifest.renderGroups[0].pageCount >= 1, true);
+  assert.equal(first.manifest.renderGroups[1].pageCount >= 1, true);
+  assert.equal(first.manifest.renderGroups[0].profile, "normal");
+  assert.equal(first.manifest.renderGroups[1].profile, "conservative");
+  for (const [index, dimensions] of first.manifest.pageDimensions.entries()) {
+    const imagePath = join(dir, `group-${index}.png`);
+    writeFileSync(imagePath, first.images[index]);
+    const geometry = `${dimensions.width}x3+0+${dimensions.height - 3}`;
+    const mean = execFileSync("magick", [imagePath, "-crop", geometry, "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"], { encoding: "utf8" });
+    assert.ok(Number(mean) > 0.999, `page ${index + 1} has non-white pixels in its bottom safety margin`);
+  }
+  const second = await renderSources(inputs, () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache") });
+  assert.equal(second.manifest.cache.hit, true);
+  assert.deepEqual(second.images, first.images);
+  const conservative = await renderSources(inputs, () => {}, getVisualProfile("conservative"), { cacheDirectory: join(dir, "conservative-cache") });
+  assert.equal(conservative.manifest.renderGroups.length, 1);
+  assert.equal(conservative.manifest.renderGroups[0].profile, "conservative");
+  assert.equal(conservative.manifest.renderGroups[0].reason, "explicit-profile");
+});
+
+test("final PNG cache hits without invoking layout or rasterization", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-cache-test-"));
+  const cache = join(dir, "cache");
+  const source = join(dir, "cache.py");
+  writeFileSync(source, "value = 1\n");
+  const input = [{ path: source, displayPath: "cache.py", language: "Python" }];
+  const firstStatuses = [];
+  const first = await renderSources(input, (status) => firstStatuses.push(status), getVisualProfile("normal"), { cacheDirectory: cache });
+  assert.equal(first.manifest.cache.hit, false);
+  assert.ok(first.manifest.timingsMs.compact >= 0);
+  assert.ok(first.manifest.timingsMs.typst >= 0);
+  assert.ok(first.manifest.timingsMs.pdfinfo >= 0);
+  assert.ok(first.manifest.timingsMs.rasterAndPostprocess >= 0);
+  assert.ok(first.manifest.timingsMs.workers >= 1);
+  assert.ok(first.manifest.timingsMs.total >= 0);
+  assert.ok(firstStatuses.some((status) => status.startsWith("laying out")));
+  const secondStatuses = [];
+  const second = await renderSources(input, (status) => secondStatuses.push(status), getVisualProfile("normal"), { cacheDirectory: cache });
+  assert.equal(second.manifest.cache.hit, true);
+  assert.deepEqual(second.images, first.images);
+  assert.ok(secondStatuses.includes(`cache hit · ${first.images.length} tablets`));
+  assert.equal(secondStatuses.some((status) => status.startsWith("laying out")), false);
+  assert.equal(secondStatuses.some((status) => status.startsWith("rasterizing")), false);
+  assert.ok(second.manifest.timingsMs.cacheLookup >= 0);
+  await assert.rejects(() => renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache, onCacheHit: async () => false }), RenderCancelled);
+
+  const key = first.manifest.cache.key;
+  rmSync(join(cache, key, "page-001.png"));
+  const repaired = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache });
+  assert.equal(repaired.manifest.cache.hit, false);
+  assert.deepEqual(repaired.images, first.images);
+  writeFileSync(source, "value = 2\n");
+  const changed = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache });
+  assert.equal(changed.manifest.cache.hit, false);
+
+  writeFileSync(join(cache, changed.manifest.cache.key, "cache-manifest.json"), "not json");
+  const regenerated = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache });
+  assert.equal(regenerated.manifest.cache.hit, false);
+  assert.ok(existsSync(join(cache, regenerated.manifest.cache.key, "cache-manifest.json")));
+});
+
+test("cache identity includes order, visual names, and profile", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-cache-identity-test-"));
+  const cache = join(dir, "cache");
+  const a = join(dir, "a.py");
+  const b = join(dir, "b.py");
+  writeFileSync(a, "a = 1\n");
+  writeFileSync(b, "b = 2\n");
+  const render = (inputs, profile = "normal") => renderSources(inputs, () => {}, getVisualProfile(profile), { cacheDirectory: cache });
+  const one = await render([{ path: a, displayPath: "a.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }]);
+  const reordered = await render([{ path: b, displayPath: "b.py", language: "Python" }, { path: a, displayPath: "a.py", language: "Python" }]);
+  const renamed = await render([{ path: a, displayPath: "renamed.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }]);
+  const conservative = await render([{ path: a, displayPath: "a.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }], "conservative");
+  assert.equal(one.manifest.cache.hit, false);
+  assert.equal(reordered.manifest.cache.hit, false);
+  assert.equal(renamed.manifest.cache.hit, false);
+  assert.equal(conservative.manifest.cache.hit, false);
+  const hit = await render([{ path: a, displayPath: "a.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }]);
+  assert.equal(hit.manifest.cache.hit, true);
+});
+
+test("Git provenance handles clean, dirty, detached, outside, and multiple repositories", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "pi-visual-git-test-"));
+  const source = join(repo, "source.py");
+  writeFileSync(source, "value = 1\n");
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Visual Context Test"], { cwd: repo });
+  execFileSync("git", ["add", "source.py"], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
+  const clean = await collectGitProvenance([source, source]);
+  assert.equal(clean.provenance.repositories.length, 1);
+  assert.equal(clean.repositoryIds[0], 0);
+  assert.equal(clean.repositoryIds[1], 0);
+  assert.equal(clean.provenance.repositories[0].root, repo);
+  assert.match(clean.provenance.repositories[0].head, /^[0-9a-f]{40}$/);
+  assert.ok(clean.provenance.repositories[0].branch);
+  assert.equal(clean.provenance.repositories[0].dirty, false);
+  writeFileSync(join(repo, "untracked.py"), "value = 2\n");
+  const dirty = await collectGitProvenance([source]);
+  assert.equal(dirty.provenance.repositories[0].dirty, true);
+  execFileSync("git", ["checkout", "-q", "--detach", "HEAD"], { cwd: repo });
+  const detached = await collectGitProvenance([source]);
+  assert.equal(detached.provenance.repositories[0].head, clean.provenance.repositories[0].head);
+  assert.equal(detached.provenance.repositories[0].branch, null);
+  const outside = await collectGitProvenance([join(tmpdir(), "not-a-source.py")]);
+  assert.deepEqual(outside, { provenance: { repositories: [] }, repositoryIds: [null] });
+  const repo2 = mkdtempSync(join(tmpdir(), "pi-visual-git-test-2-"));
+  const source2 = join(repo2, "other.py");
+  writeFileSync(source2, "value = 3\n");
+  execFileSync("git", ["init", "-q"], { cwd: repo2 });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo2 });
+  execFileSync("git", ["config", "user.name", "Visual Context Test"], { cwd: repo2 });
+  execFileSync("git", ["add", "other.py"], { cwd: repo2 });
+  execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: repo2 });
+  const multiple = await collectGitProvenance([source, source2]);
+  assert.equal(multiple.provenance.repositories.length, 2);
+  assert.deepEqual(multiple.repositoryIds, [0, 1]);
+});
+
+test("Git metadata changes do not invalidate the render cache", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "pi-visual-git-cache-test-"));
+  const source = join(repo, "source.py");
+  writeFileSync(source, "value = 1\n");
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Visual Context Test"], { cwd: repo });
+  execFileSync("git", ["add", "source.py"], { cwd: repo });
+  execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: repo });
+  const cacheDirectory = mkdtempSync(join(tmpdir(), "pi-visual-git-cache-entries-"));
+  const input = [{ path: source, displayPath: "source.py", language: "Python" }];
+  const first = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory });
+  assert.equal(first.manifest.cache.hit, false);
+  assert.equal(first.manifest.git.repositories[0].dirty, false);
+  writeFileSync(join(repo, "untracked.py"), "unrelated = true\n");
+  const second = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory });
+  assert.equal(second.manifest.cache.hit, true);
+  assert.equal(second.manifest.cache.key, first.manifest.cache.key);
+  assert.equal(second.manifest.git.repositories[0].dirty, true);
+  assert.deepEqual(second.images, first.images);
+});
+
+test("raster worker policy is bounded and page mapping preserves order", async () => {
+  assert.ok(rasterWorkerCount(2, {}) >= 1 && rasterWorkerCount(2, {}) <= 2);
+  assert.equal(rasterWorkerCount(18, { PI_VISUAL_CONTEXT_RASTER_WORKERS: "1" }), 1);
+  assert.ok(rasterWorkerCount(18, { PI_VISUAL_CONTEXT_RASTER_WORKERS: "4" }) >= 1 && rasterWorkerCount(18, { PI_VISUAL_CONTEXT_RASTER_WORKERS: "4" }) <= 4);
+  assert.throws(() => rasterWorkerCount(18, { PI_VISUAL_CONTEXT_RASTER_WORKERS: "0" }), /integer >= 1/);
+  assert.throws(() => rasterWorkerCount(18, { PI_VISUAL_CONTEXT_RASTER_WORKERS: "nope" }), /integer >= 1/);
+  const progress = [];
+  const pages = await mapPages(4, 4, async (page) => {
+    await new Promise((resolve) => setTimeout(resolve, (3 - page) * 2));
+    return `page-${page + 1}`;
+  }, (completed) => progress.push(completed));
+  assert.deepEqual(pages, ["page-1", "page-2", "page-3", "page-4"]);
+  assert.deepEqual(progress, [1, 2, 3, 4]);
+  await assert.rejects(() => mapPages(4, 4, async (page) => { if (page === 2) throw new Error("page failed"); return page; }), /page failed/);
 });
 
 test("C codec is deterministic on a focused fixture", () => {

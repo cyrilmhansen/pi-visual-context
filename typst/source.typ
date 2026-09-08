@@ -16,7 +16,7 @@
 )
 #set text(
   font: font-name,
-  fallback: false,
+  fallback: true,
   size: font-size,
   fill: black,
   kerning: false,

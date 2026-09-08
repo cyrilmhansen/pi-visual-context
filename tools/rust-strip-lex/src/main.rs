@@ -1,4 +1,4 @@
-use std::{env, fs, process::Command};
+use std::{env, fs};
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum K {
     Ws,
@@ -186,7 +186,7 @@ fn main() {
     }
     let src = args[1].clone();
     let out = args[2].clone();
-    let font = args[3].clone();
+    let _font = args[3].clone();
     let s = fs::read_to_string(&src).expect("read source");
     let ts = rustc_lexer::tokenize(&s);
     let orig_lf = s.bytes().filter(|&b| b == b'\n').count();
@@ -255,29 +255,5 @@ fn main() {
         .collect();
     assert_eq!(got, nonws, "token validation failed");
     assert_eq!(z, orig_lf, "LF validation failed");
-    let charset = String::from_utf8(
-        Command::new("fc-query")
-            .args(["--format=%{charset}", &font])
-            .output()
-            .expect("fc-query")
-            .stdout,
-    )
-    .unwrap();
-    for c in o.chars() {
-        if c == '\u{200b}' {
-            continue;
-        }
-        let n = c as u32;
-        let ok = charset.split_whitespace().any(|r| {
-            let q: Vec<&str> = r.split('-').collect();
-            let a = u32::from_str_radix(q[0], 16).unwrap();
-            let b = q
-                .get(1)
-                .and_then(|x| u32::from_str_radix(x, 16).ok())
-                .unwrap_or(a);
-            n >= a && n <= b
-        });
-        assert!(ok, "unsupported Romulus character U+{:04X}", n)
-    }
     println!("original bytes={} chars={} LF={} TAB={}\nencoded visible chars={} ¶={} »={} spaces={} compression ratio={:.4}\nomitted same-line whitespaces={} output={}",s.as_bytes().len(),s.chars().count(),orig_lf,orig_tab,visible,z,tabs,spaces,ratio,omissions,out);
 }

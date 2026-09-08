@@ -47,7 +47,9 @@ export default function (pi: ExtensionAPI) {
     try {
       const { sources, question, profile: profileName, render: preview, open } = parseVisualInput(event.text);
       const profile = getVisualProfile(profileName);
+      const readStarted = performance.now();
       const sourcePaths = await expandSourcePatterns(sources, ctx.cwd);
+      const expansionMs = Math.round((performance.now() - readStarted) * 100) / 100;
       if (!await confirmFileBudget(ctx.ui, sourcePaths.length)) {
         ctx.ui.setStatus("visual-context", undefined);
         return { action: "handled" };
@@ -60,11 +62,14 @@ export default function (pi: ExtensionAPI) {
         return { path: sourcePath, displayPath: displayPaths[index], language };
       });
       const rendered = await renderSources(renderInputs, status, profile, {
+        readMs: expansionMs,
         beforeRasterize: async (tabletCount, sourceChars) => confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
+        onCacheHit: preview ? undefined : async (tabletCount, sourceChars) => confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment()),
       });
       const images = rendered.images;
       const pageDimensions = rendered.manifest.pageDimensions;
-      status(`ready: ${images.length} pages, ${pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
+      if (rendered.manifest.cache?.hit) status(`cache hit · ${images.length} tablets`);
+      else status(`ready: ${images.length} pages, ${pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
@@ -100,6 +105,7 @@ export default function (pi: ExtensionAPI) {
       const message = error instanceof Error ? error.message : String(error);
       status(`failed: ${message}`);
       ctx.ui.notify(`@v failed: ${message}`, "error");
+      ctx.ui.setStatus("visual-context", undefined);
       return { action: "handled" };
     }
   });

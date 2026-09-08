@@ -6,10 +6,10 @@
 |---|---|---|---|
 | **0.1 — Prototype autonome** | Publier quelque chose qui fonctionne réellement | Extension Pi, `rust-strip-lex` embarqué, profils `normal`/`conservative`, rendu Typst, recadrage de la dernière page, en-têtes, artefacts de debug, usage des tokens, script de release | Un clone peut être construit et `@v` fonctionne localement sans dépendre du repo POC |
 | **0.2 — Python dense, preview et premier usage projet réel** | Rendre `@v` immédiatement utile sur Atlas Agent Python | Codec Python dense (`¶` y compris dans les chaînes multilignes, profondeur logique), globs déterministes, flux multifichier continu, bandeaux graphiques, confirmations, `--render`/`--open`, mélange Rust/C/Python | Fixtures codec/rendu/garde-fous déterministes, build release, `npm pack`, smoke local sans LLM |
-| **0.3 — Packaging multiplateforme** | Rendre l’installation raisonnable | Binaires ou installation guidée, releases multiplateformes, cache Pi/provider | Installation documentée depuis Git ou npm |
+| **0.3 — Cache, Unicode et raster parallèle** | Éviter les recalculs et accélérer le premier rendu | Cache complet des PNG finaux, timings muraux, groupes Romulus/fallback, rasterisation et post-traitement par page | Fichier inchangé → aucun nouveau rendu ; PNG identiques avec 1 ou plusieurs workers |
 | **0.4 — Navigation visuelle** | Passer de « fichier-image » à un véritable contexte source | Plages de lignes et symboles, plusieurs fichiers, index texte minimal, provenance et métadonnées de pages | Le modèle peut demander ou retrouver une zone précise |
 | **0.5 — Codec visuel v1** | Formaliser ce qui est encodé | Représentation auto-descriptive, métadonnées dans l’image, symboles LF/TAB, profils, version du codec | Format reproductible et versionné |
-| **0.6 — Performance et cache** | Éviter les recalculs et optimiser les coûts | Hash source + profil, cache d’images, invalidation, prise en compte du prompt cache, métriques de tokens d’entrée | Fichier inchangé → aucun nouveau rendu |
+| **0.6 — Coûts et cache provider** | Réduire les coûts au-delà du rendu local | Prompt cache, métriques de tokens d’entrée, optimisations provider | Mesures reproductibles sans changer les pixels |
 | **0.7 — Expérimentations de programmation visuelle** | Exploiter réellement le canal graphique | Couleurs catégorielles, boîtes, relations, références spatiales, graphes, annotations | Gains au-delà du simple texte rasterisé |
 | **1.0 — Visual context layer** | Faire de l’extension un composant générique | API stable, plusieurs langages, plugin Pi propre, éventuellement Atlas | Usage quotidien stable et documentation publique |
 
@@ -19,7 +19,7 @@
 
 Le prototype autonome 0.1 est maintenant implémenté et validé sans appel LLM : build Rust, profils, rendu, crop, en-têtes, artefacts de debug, usage et packaging sont en place.
 
-Le support multifichier de base, les codecs Rust/C et la commande Pi `/visual-context` d’aide/découverte sont également implémentés. La navigation par symboles, l’indexation et le cache restent futurs.
+Le support multifichier de base, les codecs Rust/C et la commande Pi `/visual-context` d’aide/découverte sont également implémentés. Le cache déterministe, l’instrumentation temporelle et le raster/post-traitement parallèle par page constituent le scope 0.3 ; la navigation par symboles et l’indexation restent futures.
 
 ## 0.1 — Terminé
 
@@ -69,7 +69,7 @@ Ces éléments sont désormais terminés. Le prochain travail porte sur l’usag
 
 Le prochain incrément ajoute le codec Python lexical dense, les globs déterministes et le mode `@v --render`/`--open` sans appel modèle, construit avec `rustpython-parser` 0.4 et son feature `full-lexer`. `¶` représente les LF et `N»` la profondeur logique (`»` est le glyphe disponible pour `⇥`). Les fichiers sont réunis dans un document Typst continu avec bandeaux, tandis que les confirmations séparent le coût local des fichiers du coût multimodal des tablettes.
 
-## 0.3 — Distribution multiplateforme
+## Distribution multiplateforme — notes historiques
 
 La distribution de base est maintenant résolue : Romulus est embarqué avec son attribution, le helper Rust/C est fourni en source et les scripts de build/package sont présents.
 
@@ -104,7 +104,7 @@ avec des binaires précompilés dans les releases.
 
 ---
 
-## 0.3 — Arrêter les microbenchmarks et utiliser le système
+## Expériences réelles — notes historiques
 
 C’est probablement l’étape la plus importante après la release.
 

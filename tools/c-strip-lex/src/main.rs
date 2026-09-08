@@ -1,4 +1,4 @@
-use std::{env, fs, process::Command};
+use std::{env, fs};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum K { Ws, Comment, Ident, Number, Literal, Punct }
@@ -33,6 +33,5 @@ fn main() {
     let visible=out.chars().count(); let lf=out.chars().filter(|&c|c=='¶').count(); let zw=out.chars().flat_map(|c|[c,'\u{200b}']).collect::<String>(); fs::write(&a[2],zw).expect("write output");
     let mut decoded=String::new(); let mut it=out.chars(); while let Some(c)=it.next(){if c=='¤'{if let Some(x)=it.next(){decoded.push(x)}}else if c=='¶'{decoded.push('\n')}else if c=='»'{decoded.push('\t')}else{decoded.push(c)}}
     let original: String=ts.iter().filter(|t|t.k!=K::Ws).map(|t|t.s.as_str()).collect(); let got:String=tokenize(&decoded).iter().filter(|t|t.k!=K::Ws).map(|t|t.s.as_str()).collect(); assert_eq!(got,original,"token validation failed"); assert_eq!(lf,source.matches('\n').count(),"LF validation failed");
-    let charset=String::from_utf8(Command::new("fc-query").args(["--format=%{charset}",&a[3]]).output().expect("fc-query").stdout).unwrap(); for c in out.chars(){if c=='\u{200b}'{continue;} let n=c as u32; let ok=charset.split_whitespace().any(|r|{let q:Vec<&str>=r.split('-').collect();let lo=u32::from_str_radix(q[0],16).unwrap();let hi=q.get(1).and_then(|x|u32::from_str_radix(x,16).ok()).unwrap_or(lo);n>=lo&&n<=hi}); assert!(ok,"unsupported font character U+{:04X}",n)}
     println!("original bytes={} chars={} LF={}\nencoded visible chars={} compression ratio={:.4}",source.as_bytes().len(),source.chars().count(),lf,visible,visible as f64/source.chars().count() as f64);
 }

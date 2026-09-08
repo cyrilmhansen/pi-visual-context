@@ -1,4 +1,4 @@
-use std::{env, fs, process::Command};
+use std::{env, fs};
 use rustpython_parser::{lexer, Mode, Tok};
 
 fn enc_token(s: &str) -> String {
@@ -99,12 +99,5 @@ fn main() {
 
     assert_eq!(linefeeds, expected_linefeeds, "LF validation failed");
 
-    let charset = String::from_utf8(Command::new("fc-query").args(["--format=%{charset}", &args[3]]).output().expect("fc-query").stdout).unwrap();
-    for c in output.chars() {
-        if c == '\n' || c == '\t' { continue; }
-        let n = c as u32;
-        let supported = charset.split_whitespace().any(|range| { let parts: Vec<&str> = range.split('-').collect(); let lo = u32::from_str_radix(parts[0], 16).unwrap(); let hi = parts.get(1).and_then(|x| u32::from_str_radix(x, 16).ok()).unwrap_or(lo); n >= lo && n <= hi });
-        assert!(supported, "unsupported font character U+{:04X}", n);
-    }
     println!("original bytes={} chars={} LF={}\nencoded visible chars={} compression ratio={:.4}", source.len(), source.chars().count(), linefeeds, visible, visible as f64 / source.chars().count() as f64);
 }
