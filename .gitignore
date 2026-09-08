@@ -1,5 +1,7 @@
 node_modules/
 dist/
+tools/rust-strip-lex/target/
+.pi/
 .pi-visual-context-cache/
 *.png
 *.pdf

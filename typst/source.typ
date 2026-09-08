@@ -10,7 +10,7 @@
 #set page(
   width: 1056pt,
   height: 960pt,
-  margin: (left: side-margin, right: side-margin, top: 8pt, bottom: 2pt),
+  margin: (left: side-margin, right: side-margin, top: 2pt, bottom: 2pt),
   fill: white,
 )
 #set text(
