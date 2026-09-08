@@ -92,17 +92,16 @@ A fixed-size image can encode much more than plain characters:
 
 The long-term idea is to treat visual context as a symbolic representation layer for multimodal LLMs, rather than as a screenshot-oriented interface.
 
-## Planned Pi integration
+## Pi integration
 
-The first Pi integration will be intentionally small.
-
-Conceptually:
+The extension accepts:
 
 ```text
-/vfile src/parser.rs
+@v src/parser.rs -- Explain the architecture.
+@v --profile conservative src/parser.rs -- Explain the architecture.
 ```
 
-will:
+Conceptually:
 
 ```text
 Rust source
@@ -120,19 +119,24 @@ Pi ImageContent attachment(s)
 
 Pi will then persist the images as part of the conversation session.
 
+Build the local Rust helper once before use:
+
+```bash
+npm run build:rust
+```
+
 ## Project status
 
-Very early experimental prototype.
+First release candidate; intentionally narrow and Rust-only.
 
-Current priorities:
+Current scope:
 
-- minimal `/vfile` Pi extension
-- reusable rendering pipeline
-- Rust source codec
-- session persistence testing
-- source-to-image indexing
-- later: multiple density profiles
-- later: other languages and conversation archives
+- `@v` Pi input transformation
+- Rust source codec and visual rendering
+- normal and conservative rendering profiles
+- ordered PNG attachments and debug manifests
+
+Other languages, indexing, and archive features are out of scope for this release candidate.
 
 ## Requirements
 
@@ -145,7 +149,9 @@ The current prototype pipeline expects:
 - ImageMagick
 - Rust tooling for lexical processing
 
-Exact installation instructions will be added once the first end-to-end extension is working.
+Romulus is bundled at `assets/fonts/romulus/Romulus.ttf`.
+
+Attribution: Romulus, copyright/author Hewett Tsoi, source: https://www.dafont.com/romulus.font. DaFont lists it as 100% Free; the author's note says, "Credit is appreciated." The same attribution is recorded in `THIRD_PARTY_NOTICES.md`.
 
 ## Design principles
 

@@ -3,6 +3,7 @@ import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { parseVisualInput, renderRust } from "./rust";
+import { getVisualProfile } from "./profile";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -36,12 +37,13 @@ export default function (pi: ExtensionAPI) {
     if (event.source === "extension" || !event.text.startsWith("@v ")) return { action: "continue" };
     const status = (text: string) => ctx.ui.setStatus("visual-context", `visual-context: ${text}`);
     try {
-      const { source, question } = parseVisualInput(event.text);
+      const { source, question, profile: profileName } = parseVisualInput(event.text);
+      const profile = getVisualProfile(profileName);
       const sourcePath = resolve(ctx.cwd, source);
       try { await access(sourcePath); } catch { throw new Error(`source file does not exist: ${source}`); }
       const sourceText = await readFile(sourcePath, "utf8");
       status(`${basename(sourcePath)} ${Buffer.byteLength(sourceText)} B / ${sourceText.length} chars`);
-      const result = await renderRust(sourcePath, status);
+      const result = await renderRust(sourcePath, status, profile);
       const { manifest } = result;
       status(`ready: ${manifest.pageCount} pages, ${manifest.pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
