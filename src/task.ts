@@ -28,6 +28,7 @@ export type TaskManifest = {
 export type TaskRenderResult = { images: Buffer[]; manifest: TaskManifest };
 export type TaskRenderOptions = {
   beforeRasterize?: (pageCount: number, chars: number) => Promise<boolean>;
+  onCacheHit?: (pageCount: number, chars: number) => Promise<boolean>;
   cacheDirectory?: string;
 };
 
@@ -101,6 +102,7 @@ export async function renderTask(prompt: string, status: (text: string) => void,
     const cached = await loadTaskCache(cacheDirectory, identity.key);
     const lookupMs = elapsedMs(lookupStarted);
     if (cached) {
+      if (options.onCacheHit && !await options.onCacheHit(cached.images.length, cached.manifest.chars)) throw new RenderCancelled();
       cached.manifest.timingsMs = { cacheLookup: lookupMs, total: elapsedMs(totalStarted) };
       cached.manifest.workers = 0;
       cached.manifest.cache = { schemaVersion: TASK_SCHEMA_VERSION, key: identity.key, hit: true };

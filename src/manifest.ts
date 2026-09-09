@@ -29,7 +29,7 @@ export function buildRequestManifest(
 export function buildVisualPromptRequestManifest(
   task: TaskManifest,
   taskFiles: string[],
-  source: RenderManifest,
+  source: RenderManifest | null,
   sourceManifests: RenderedSource[],
   sourceFiles: string[],
   usage: Record<string, unknown>,
@@ -37,10 +37,10 @@ export function buildVisualPromptRequestManifest(
   return {
     visualPrompt: true,
     task: { ...task, pages: taskFiles },
-    source: { ...source, pages: sourceFiles, sources: sourceManifests.map((item) => ({ ...item.manifest, sourcePath: item.path })) },
+    source: source ? { ...source, pages: sourceFiles, sources: sourceManifests.map((item) => ({ ...item.manifest, sourcePath: item.path })) } : null,
     pageCount: taskFiles.length + sourceFiles.length,
-    sourceChars: source.sourceChars,
-    globalMetrics: { sourceChars: source.sourceChars, sourceBytes: source.sourceBytes, encodedChars: source.encodedChars, removedChars: source.removedChars },
+    sourceChars: source?.sourceChars ?? 0,
+    globalMetrics: { sourceChars: source?.sourceChars ?? 0, sourceBytes: source?.sourceBytes ?? 0, encodedChars: source?.encodedChars ?? 0, removedChars: source?.removedChars ?? 0 },
     totalTablets: taskFiles.length + sourceFiles.length,
     usage,
   };

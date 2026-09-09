@@ -110,6 +110,7 @@ The extension accepts:
 @v --render --profile conservative src/**/*.py
 @v --render --open src/**/*.py
 @v --visual-prompt src/**/*.py -- Explain the architecture in detail.
+@v --visual-prompt -- Explain the architecture without source files.
 @v --visual-prompt --render src/**/*.py -- Explain the architecture in detail.
 @v external/opl3/opl3.h external/opl3/opl3.c -- Explain how this API works.
 ```
@@ -145,8 +146,9 @@ First release candidate; intentionally narrow.
 Current scope:
 
 - `@v` Pi input transformation
-- Rust, C, and Python source codecs
-- `.rs`, `.c`, `.h`, and `.py` inputs, including deterministic `*` and `**` globs
+- Rust, C, and Python source codecs, with specialized codecs taking priority
+- generic strict UTF-8 text fallback for other files
+- `.rs`, `.c`, `.h`, and `.py` inputs, plus UTF-8 text files without an extension or with unknown extensions, including deterministic `*` and `**` globs
 - glob results sorted lexically, deduplicated, and restricted to regular files
 - ordered multifile PNG attachments and debug manifests
 - `@v --render` preview mode, with optional `--open` and no model call
@@ -156,6 +158,7 @@ Current scope:
 - deterministic final-PNG cache in `.pi/visual-context/cache/`, keyed by source bytes, order, display names, profile, template, font, and renderer parameters; Git provenance is manifest-only and does not affect the key; set `PI_VISUAL_CONTEXT_CACHE=0` to disable it
 - bounded parallel rasterization and per-page post-processing, defaulting to at most 4 workers; override with `PI_VISUAL_CONTEXT_RASTER_WORKERS`
 - deterministic Romulus cmap classification: compatible files render in the normal group, while files containing missing glyphs render in the conservative fallback group
+- binary files and invalid UTF-8 are rejected by the generic text fallback; legacy encodings are not detected
 - best-effort `fontsUsed` metadata extracted from each rendered PDF, including TASK and source render groups
 
 Source patterns preserve argument order; each glob is sorted lexically, duplicates are removed at first occurrence, and a glob with no regular-file matches is an error. Python uses `¶` for logical line breaks, including LF characters inside multiline strings, and `N»` for logical indentation depth (`»` is the bundled-font equivalent of `⇥`); continuation indentation is omitted. Literal `\\n` sequences remain unchanged. The C and Python codecs are lexical only: they do not preprocess, expand macros, reformat, or rewrite source. Comments, directives, macros, strings, characters, indentation, and significant newlines are preserved. Other languages, indexing, and archive features remain out of scope.
@@ -167,6 +170,10 @@ Rasterization and final PNG post-processing run page-by-page in a bounded worker
 When the requested profile is `normal`, each compacted file is classified using the bundled Romulus cmap, including its visual filename. Romulus-compatible files are rendered first with the normal profile; files requiring fallback glyphs are rendered afterward with the existing conservative profile. An explicit `--profile conservative` keeps the entire request conservative. Romulus is the only bundled font. Typst fallback is best-effort and uses fonts installed on the host, so Unicode appearance can differ between machines. With system fonts disabled, the installed Typst version still exits successfully and produces a PDF for an unavailable emoji glyph, without a reliable missing-glyph diagnostic; the project therefore does not scan pixels or system cmaps for tofu detection. `fontsUsed` records the normalized font names reported by `pdffonts` for each actual PDF; an empty list means that diagnostic was unavailable.
 
 Debug manifests also include best-effort local Git provenance for each distinct repository. It is informational, supports files outside Git and multiple repositories, and is refreshed on cache hits without invalidating the rendered-image cache.
+
+`--visual-prompt` can render only TASK tablets with no source files, or TASK tablets followed by SOURCE tablets. The short historical text mode remains preferable for short questions.
+
+The generic text fallback preserves text structure without parsing Markdown, JSON, YAML, or other grammars. It normalizes CRLF/CR to LF and expands tabs to four spaces deterministically. Specialized `.rs`, `.c`/`.h`, and `.py` codecs always take priority. Unicode text follows the same normal/conservative Romulus classification as source files.
 
 The final rendered PNGs are cached locally after a successful render. Source entries remain in `.pi/visual-context/cache/`; opt-in TASK entries use the separate `.pi/visual-context/cache/task/` namespace. Cache entries are content-addressed and invalidated automatically when any source, profile, visual name, template, font, codec convention, or renderer parameter changes. Opt-in `--visual-prompt` renders the natural-language question as separate TASK tablets before the SOURCE tablets; its cache is keyed only by the exact prompt and task renderer identity. For short questions, the historical text mode is usually more efficient. The cache key does not fingerprint the host's system fallback-font inventory: if installed fonts change, use `PI_VISUAL_CONTEXT_CACHE=0` once or purge `.pi/visual-context/cache/` and `.pi/visual-context/cache/task/`. Debug output remains per invocation; set `PI_VISUAL_CONTEXT_CACHE=0` (also accepts `false`, `no`, or `off`) to disable both caches.
 

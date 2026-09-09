@@ -7,6 +7,7 @@ Usage:
 
 Visual prompt (opt-in):
   @v --visual-prompt src/**/*.py -- long question
+  @v --visual-prompt -- long question
   Render the task as visual tablets; short prompts are usually better as text.
 
 Preview:
@@ -18,7 +19,7 @@ Profiles:
   @v --profile conservative file.py -- question
   normal | conservative
 
-Languages: .rs .c .h .py
+Languages: .rs .c .h .py (other files: generic UTF-8 text fallback)
 Options: --visual-prompt  --render  --open  --profile conservative
 
 Environment:

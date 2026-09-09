@@ -1,6 +1,6 @@
 {
   "name": "pi-visual-context",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Pi extension for dense multimodal visual source context",
   "keywords": ["pi-package"],

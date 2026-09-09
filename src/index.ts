@@ -49,7 +49,7 @@ export default function (pi: ExtensionAPI) {
       const { sources, question, profile: profileName, render: preview, open, visualPrompt } = parseVisualInput(event.text);
       const profile = getVisualProfile(profileName);
       const readStarted = performance.now();
-      const sourcePaths = await expandSourcePatterns(sources, ctx.cwd);
+      const sourcePaths = sources.length ? await expandSourcePatterns(sources, ctx.cwd) : [];
       const expansionMs = Math.round((performance.now() - readStarted) * 100) / 100;
       if (!await confirmFileBudget(ctx.ui, sourcePaths.length)) {
         ctx.ui.setStatus("visual-context", undefined);
@@ -58,45 +58,49 @@ export default function (pi: ExtensionAPI) {
       const displayPaths = displaySourcePaths(sourcePaths, ctx.cwd);
       const renderInputs = sourcePaths.map((sourcePath, index) => {
         const extension = extname(sourcePath).toLowerCase();
-        const language = extension === ".rs" ? "Rust" as const : extension === ".py" ? "Python" as const : [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"].includes(extension) ? "C" as const : undefined;
-        if (!language) throw new Error(`unsupported source extension: ${extension}`);
+        const language = extension === ".rs" ? "Rust" as const : extension === ".py" ? "Python" as const : [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"].includes(extension) ? "C" as const : "Text" as const;
         return { path: sourcePath, displayPath: displayPaths[index], language };
       });
-      const taskResult = visualPrompt ? await renderTask(question, (text) => status(`task ${text}`)) : undefined;
+      const taskOnlyConfirm = async (pageCount: number, chars: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, 0, pageCount, chars, maxTabletsFromEnvironment(), mode);
+      const taskResult = visualPrompt ? await renderTask(question, (text) => status(`task ${text}`), sourcePaths.length ? {} : {
+        beforeRasterize: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
+        onCacheHit: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
+      }) : undefined;
       const confirmTotal = async (sourceTablets: number, sourceChars: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, sourcePaths.length, (taskResult?.images.length ?? 0) + sourceTablets, sourceChars, maxTabletsFromEnvironment(), mode);
-      const rendered = await renderSources(renderInputs, status, profile, {
+      const rendered = sourcePaths.length ? await renderSources(renderInputs, status, profile, {
         readMs: expansionMs,
         beforeRasterize: async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, preview ? "preview" : "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
         onCacheHit: preview ? (visualPrompt ? async (tabletCount, sourceChars) => confirmTotal(tabletCount, sourceChars, "preview") : undefined) : async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment()),
-      });
+      }) : undefined;
       const taskImages = taskResult?.images ?? [];
-      const images = [...taskImages, ...rendered.images];
-      const pageDimensions = [...(taskResult?.manifest.pageDimensions ?? []), ...rendered.manifest.pageDimensions];
-      if (visualPrompt) status(`ready: task ${taskImages.length} + source ${rendered.images.length} tablets`);
-      else if (rendered.manifest.cache?.hit) status(`cache hit · ${images.length} tablets`);
+      const sourceImages = rendered?.images ?? [];
+      const images = [...taskImages, ...sourceImages];
+      const pageDimensions = [...(taskResult?.manifest.pageDimensions ?? []), ...(rendered?.manifest.pageDimensions ?? [])];
+      if (visualPrompt) status(`ready: task ${taskImages.length} + source ${sourceImages.length} tablets`);
+      else if (rendered?.manifest.cache?.hit) status(`cache hit · ${images.length} tablets`);
       else status(`ready: ${images.length} pages, ${pageDimensions.map((page) => `${page.width}x${page.height}`).join(", ")}`);
       Object.assign(usage, { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 });
       const now = new Date();
       const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}-${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
-      const firstBase = basename(sourcePaths[0], extname(sourcePaths[0]));
-      const debugName = sources.length === 1 ? firstBase : `${firstBase}-multi`;
+      const firstBase = sourcePaths.length ? basename(sourcePaths[0], extname(sourcePaths[0])) : "task-only";
+      const debugName = !sourcePaths.length ? "task-only" : sources.length === 1 ? firstBase : `${firstBase}-multi`;
       const debugDir = resolve(ctx.cwd, ".pi", "visual-context", `${stamp}-${debugName}`);
       await mkdir(debugDir, { recursive: true });
       const taskFiles = taskImages.map((_, index) => `task-${String(index + 1).padStart(3, "0")}.png`);
-      const sourceFiles = rendered.images.map((_, index) => `source-${String(index + 1).padStart(3, "0")}.png`);
-      const legacyPageFiles = rendered.images.map((_, index) => `page-${String(index + 1).padStart(3, "0")}.png`);
+      const sourceFiles = (rendered?.images ?? []).map((_, index) => `source-${String(index + 1).padStart(3, "0")}.png`);
+      const legacyPageFiles = (rendered?.images ?? []).map((_, index) => `page-${String(index + 1).padStart(3, "0")}.png`);
       const pageFiles = visualPrompt ? [...taskFiles, ...sourceFiles] : legacyPageFiles;
       for (let index = 0; index < images.length; index++) await writeFile(resolve(debugDir, pageFiles[index]), images[index]);
       for (const image of images) generatedImageHashes.add(imageHash(image));
       const requestManifest = visualPrompt
-        ? buildVisualPromptRequestManifest(taskResult!.manifest, taskFiles, rendered.manifest, rendered.sourceManifests, sourceFiles, { ...usage })
-        : buildContinuousRequestManifest(rendered.sourceManifests, pageFiles, rendered.manifest, { ...usage });
+        ? buildVisualPromptRequestManifest(taskResult!.manifest, taskFiles, rendered?.manifest ?? null, rendered?.sourceManifests ?? [], sourceFiles, { ...usage })
+        : buildContinuousRequestManifest(rendered!.sourceManifests, pageFiles, rendered!.manifest, { ...usage });
       const manifestPath = resolve(debugDir, "manifest.json");
       await writeFile(manifestPath, `${JSON.stringify(requestManifest, null, 2)}\n`);
-      const sourceChars = rendered.manifest.sourceChars;
+      const sourceChars = rendered?.manifest.sourceChars ?? 0;
       if (preview) {
         ctx.ui.setStatus("visual-context", undefined);
-        const previewSummary = visualPrompt ? `task ${taskImages.length} + source ${rendered.images.length} tablets` : `${compactNumber(images.length)} tablets`;
+        const previewSummary = visualPrompt ? `task ${taskImages.length} + source ${sourceImages.length} tablets` : `${compactNumber(images.length)} tablets`;
         ctx.ui.notify(`visual-context preview: ${sourcePaths.length} files · ${previewSummary} · ${compactNumber(sourceChars)} chars\n${debugDir}`, "info");
         if (open) await openPreview(debugDir, process.platform, undefined, visualPrompt ? "task-001.png" : "page-001.png");
         return { action: "handled" };
@@ -105,7 +109,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.setStatus("visual-context", undefined);
       return {
         action: "transform",
-        text: visualPrompt ? "Use the attached visual task and source context to answer." : `Use the attached visual source context to answer the question.\n\n${question}`,
+        text: visualPrompt ? (sourcePaths.length ? "Use the attached visual task and source context to answer." : "Use the attached visual task to answer.") : `Use the attached visual source context to answer the question.\n\n${question}`,
         images: [...(event.images ?? []), ...images.map((data) => ({ type: "image" as const, data: data.toString("base64"), mimeType: "image/png" as const }))],
       };
     } catch (error) {

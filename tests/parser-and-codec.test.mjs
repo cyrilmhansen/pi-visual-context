@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { classifyRenderedText, cropFinalPage, FILE_BANNER_PREFIX, formatFileBanner, mapPages, parseVisualInput, rasterWorkerCount, RenderCancelled, renderSources } from "../src/rust.ts";
-import { buildContinuousRequestManifest, buildRequestManifest } from "../src/manifest.ts";
+import { buildContinuousRequestManifest, buildRequestManifest, buildVisualPromptRequestManifest } from "../src/manifest.ts";
 import { getVisualProfile } from "../src/profile.ts";
 import { displaySourcePaths, expandSourcePatterns } from "../src/sources.ts";
 import { confirmFileBudget, confirmTabletBudget, fileConfirmationMessage, maxTabletsFromEnvironment, tabletConfirmationMessage } from "../src/policy.ts";
@@ -150,10 +150,19 @@ test("glob policy confirms only above the configurable tablet threshold", async 
   assert.equal(fileConfirmationMessage(21), "visual-context: glob matched 21 files.\nRender them?");
 });
 
-test("rejects malformed, unsupported, and unknown-profile input", () => {
+test("rejects malformed and unknown-profile input while accepting generic paths", () => {
   assert.throws(() => parseVisualInput("@v foo.rs"), /malformed/);
-  assert.throws(() => parseVisualInput("@v foo.java -- question"), /unsupported source extension/);
+  assert.deepEqual(parseVisualInput("@v ROADMAP_fr.md -- question").sources, ["ROADMAP_fr.md"]);
   assert.throws(() => getVisualProfile("dense"), /unknown visual profile/);
+});
+
+test("parses TASK-only prompts and rejects empty ones", () => {
+  assert.deepEqual(parseVisualInput("@v --visual-prompt -- long question"), {
+    source: undefined, sources: [], question: "long question", profile: "normal", render: false, open: false, visualPrompt: true,
+  });
+  assert.deepEqual(parseVisualInput("@v --visual-prompt --render --open -- long question").sources, []);
+  assert.throws(() => parseVisualInput("@v --visual-prompt --"), /non-empty prompt/);
+  assert.throws(() => parseVisualInput("@v --"), /required/);
 });
 
 const fakeManifest = (sourceBytes, pageDimensions, language = "Rust") => ({ sourceBytes, sourceChars: sourceBytes, encodedChars: sourceBytes - 1, removedChars: 1, reductionPercent: 1, profile: { name: "normal", font: "Romulus", columns: 3, scale: 1, fontSize: 10.753, leading: 2.151, sideMargin: 12, gutter: 24 }, language, pageCount: pageDimensions.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: 980 }, croppedDimensions: pageDimensions.at(-1), columnsUsed: 1, croppedRightPixels: 704, croppedBottomPixels: 0 } });
@@ -194,6 +203,42 @@ test("final-page crop keeps the 20px header and removes unused height", async ()
   assert.equal(twoColumns.width, 704);
   assert.equal(twoColumns.height, 980);
   assert.equal(twoColumns.croppedBottomPixels, 0);
+});
+
+test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specialized priority", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-generic-text-test-"));
+  const markdown = join(dir, "ROADMAP_fr.md");
+  const noExtension = join(dir, "LICENSE");
+  const unknown = join(dir, "notes.unknown");
+  const unicode = join(dir, "unicode.data");
+  writeFileSync(markdown, "# Étape\n\n日本語 😀\n");
+  writeFileSync(noExtension, "License\r\n\tCopyright\r\n");
+  writeFileSync(unknown, "key: value\rline\n");
+  writeFileSync(unicode, "日本語 😀\n");
+  const rendered = await renderSources([
+    { path: markdown, displayPath: "ROADMAP_fr.md", language: "Text" },
+    { path: noExtension, displayPath: "LICENSE", language: "Text" },
+    { path: unknown, displayPath: "notes.unknown", language: "Text" },
+    { path: unicode, displayPath: "unicode.data", language: "Text" },
+  ], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache") });
+  assert.ok(rendered.sourceManifests.every((item) => item.manifest.codec === "text"));
+  assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "normal"));
+  assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "conservative"));
+  const specialized = await renderSources([{ path: join(root, "tests/fixtures/sample.py"), displayPath: "sample.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "specialized-cache") });
+  assert.equal(specialized.sourceManifests[0].manifest.codec, "python");
+  const lf = join(dir, "lf.txt");
+  const crlf = join(dir, "crlf.txt");
+  writeFileSync(lf, "one\ntwo\tthree\n");
+  writeFileSync(crlf, "one\r\ntwo\tthree\r\n");
+  const lfRender = await renderSources([{ path: lf, displayPath: "same.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "lf-cache") });
+  const crlfRender = await renderSources([{ path: crlf, displayPath: "same.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "crlf-cache") });
+  assert.deepEqual(crlfRender.images, lfRender.images);
+  const binary = join(dir, "binary.bin");
+  writeFileSync(binary, Buffer.from([0x41, 0x00, 0x42]));
+  await assert.rejects(() => renderSources([{ path: binary, displayPath: "binary.bin", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "binary-cache") }), /text\/binary input/);
+  const invalid = join(dir, "invalid.bin");
+  writeFileSync(invalid, Buffer.from([0xc3, 0x28]));
+  await assert.rejects(() => renderSources([{ path: invalid, displayPath: "invalid.bin", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "invalid-cache") }), /requires UTF-8/);
 });
 
 test("C codec handles the bundled header/source fixture", () => {
@@ -503,6 +548,7 @@ test("visual task renderer paginates, caches, and preserves Unicode", async () =
   assert.equal(hit.manifest.cache.hit, true);
   assert.deepEqual(hit.manifest.fontsUsed, first.manifest.fontsUsed);
   assert.deepEqual(hit.images, first.images);
+  await assert.rejects(() => renderTask(short, () => {}, { cacheDirectory: cache, onCacheHit: async () => false }), RenderCancelled);
   const previousCache = process.env.PI_VISUAL_CONTEXT_CACHE;
   process.env.PI_VISUAL_CONTEXT_CACHE = "0";
   const disabled = await renderTask(short, () => {}, { cacheDirectory: join(dir, "disabled-cache") });
@@ -517,6 +563,7 @@ test("visual task renderer paginates, caches, and preserves Unicode", async () =
   const long = Array.from({ length: 160 }, (_, index) => `${index + 1}. Explain the invariant and the relationship between module ${index}.`).join("\n");
   const paged = await renderTask(long, () => {}, { cacheDirectory: join(dir, "long-cache") });
   assert.ok(paged.manifest.pageCount > 1);
+  await assert.rejects(() => renderTask(long, () => {}, { cacheDirectory: join(dir, "declined-cache"), beforeRasterize: async () => false }), RenderCancelled);
   const previousWorkers = process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
   try {
     process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "1";
@@ -530,10 +577,16 @@ test("visual task renderer paginates, caches, and preserves Unicode", async () =
   }
 });
 
-test("visual task manifest keeps task pages before source pages", () => {
+test("visual task manifest keeps task pages before source pages and supports TASK-only", async () => {
   const task = { pages: ["task-001.png", "task-002.png"] };
   const source = { pages: ["source-001.png", "source-002.png"] };
   assert.deepEqual([...task.pages, ...source.pages], ["task-001.png", "task-002.png", "source-001.png", "source-002.png"]);
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-task-only-manifest-"));
+  const result = await renderTask("A long task-only prompt.", () => {}, { cacheDirectory: join(dir, "cache") });
+  const manifest = buildVisualPromptRequestManifest(result.manifest, ["task-001.png"], null, [], [], {});
+  assert.equal(manifest.source, null);
+  assert.equal(manifest.totalTablets, result.manifest.pageCount);
+  assert.equal(manifest.pageCount, result.manifest.pageCount);
 });
 
 test("raster worker policy is bounded and page mapping preserves order", async () => {

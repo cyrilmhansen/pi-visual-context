@@ -19,7 +19,8 @@ export type RenderManifest = {
   reductionPercent: number;
   pageCount: number;
   profile: VisualProfile;
-  language: "Rust" | "C" | "Python" | "Mixed";
+  language: "Rust" | "C" | "Python" | "Text" | "Mixed";
+  codec?: "rust" | "c" | "python" | "text";
   pageDimensions: { width: number; height: number }[];
   finalPage: {
     originalDimensions: { width: number; height: number };
@@ -49,10 +50,13 @@ export type RenderManifest = {
 export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string; render: boolean; open: boolean; visualPrompt: boolean } {
   if (!text.startsWith("@v ")) throw new Error("not a visual-context input");
   const rest = text.slice(3);
-  const separator = rest.indexOf(" -- ");
+  const spacedSeparator = rest.indexOf(" -- ");
+  const endSeparator = spacedSeparator < 0 && /\s--$/.test(rest.trim()) ? rest.lastIndexOf(" --") : -1;
+  const separator = spacedSeparator >= 0 ? spacedSeparator : endSeparator;
+  const separatorLength = spacedSeparator >= 0 ? 4 : 3;
   const sourceText = separator < 0 ? rest.trim() : rest.slice(0, separator).trim();
   const sourceArgs = sourceText.split(/\s+/).filter(Boolean);
-  const question = separator < 0 ? "" : rest.slice(separator + 4).trim();
+  const question = separator < 0 ? "" : rest.slice(separator + separatorLength).trim();
   let profile = "normal";
   let render = false;
   let open = false;
@@ -70,10 +74,8 @@ export function parseVisualInput(text: string): { source: string; sources: strin
     } else sources.push(argument);
   }
   if (open) render = true;
-  if (!sources.length || (!question && !render)) throw new Error("malformed @v syntax; source paths and question are required");
-  for (const source of sources) {
-    if (!/[*?\[]/.test(source) && !/\.(rs|c|h|cc|cpp|cxx|hpp|py)$/.test(source)) throw new Error(`unsupported source extension for "${source}"; supported extensions are .rs, .c, .h, and .py`);
-  }
+  if (!sources.length && (!visualPrompt || !question)) throw new Error(visualPrompt ? "visual prompt without sources requires a non-empty prompt" : "malformed @v syntax; source paths and question are required");
+  if (!question && !render) throw new Error("malformed @v syntax; source paths and question are required");
   return { source: sources[0], sources, question, profile, render, open, visualPrompt };
 }
 
@@ -119,10 +121,10 @@ async function compactC(sourcePath: string, outDir: string, status: (text: strin
   const removedChars = source.length - encodedChars;
   const reductionPercent = source.length ? (removedChars / source.length) * 100 : 0;
   status(`compacting ${source.length} -> ${encodedChars} chars (-${reductionPercent.toFixed(1)}%)`);
-  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
+  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent, codec: "c" };
 }
 
-async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Mixed", headerPrefix?: string) {
+async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Text" | "Mixed", headerPrefix?: string) {
   const text = headerPrefix ? `${headerPrefix} | ${page}/${total}` : `${language} | visual-context | ${page}/${total} | ${profile.name}`;
   const font = resolve(root, "assets/fonts/romulus/Romulus.ttf");
   const output = `${path}.header.png`;
@@ -131,7 +133,7 @@ async function addHeader(path: string, page: number, total: number, profile: Vis
   await run("mv", [output, path]);
 }
 
-type Compacted = { output: string; sourceBytes: number; sourceChars: number; encodedChars: number; removedChars: number; reductionPercent: number };
+type Compacted = { output: string; sourceBytes: number; sourceChars: number; encodedChars: number; removedChars: number; reductionPercent: number; codec: "rust" | "c" | "python" | "text" };
 
 async function compactPython(sourcePath: string, outDir: string, status: (text: string) => void): Promise<Compacted> {
   const source = await readFile(sourcePath, "utf8");
@@ -147,7 +149,7 @@ async function compactPython(sourcePath: string, outDir: string, status: (text: 
   const removedChars = source.length - encodedChars;
   const reductionPercent = source.length ? (removedChars / source.length) * 100 : 0;
   status(`compacting ${source.length} -> ${encodedChars} chars (-${reductionPercent.toFixed(1)}%)`);
-  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
+  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent, codec: "python" };
 }
 
 async function compactRust(sourcePath: string, outDir: string, status: (text: string) => void): Promise<Compacted> {
@@ -169,12 +171,29 @@ async function compactRust(sourcePath: string, outDir: string, status: (text: st
   const removedChars = source.length - encodedChars;
   const reductionPercent = source.length ? (removedChars / source.length) * 100 : 0;
   status(`compacting ${source.length} -> ${encodedChars} chars (-${reductionPercent.toFixed(1)}%)`);
-  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
+  return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent, codec: "rust" };
+}
+
+async function compactText(sourcePath: string, outDir: string, status: (text: string) => void): Promise<Compacted> {
+  const bytes = await readFile(sourcePath);
+  if (bytes.includes(0)) throw new Error(`source is not supported as text/binary input: ${sourcePath}`);
+  let source: string;
+  try { source = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
+  catch { throw new Error(`generic text fallback requires UTF-8: ${sourcePath}`); }
+  const normalized = source.replace(/\r\n?/g, "\n").replaceAll("\t", "    ");
+  const output = resolve(outDir, "source.txt");
+  await writeFile(output, normalized, "utf8");
+  const sourceChars = source.length;
+  const encodedChars = normalized.length;
+  const removedChars = sourceChars - encodedChars;
+  const reductionPercent = sourceChars ? removedChars / sourceChars * 100 : 0;
+  status(`reading text ${sourceChars} -> ${encodedChars} chars`);
+  return { output, sourceBytes: bytes.length, sourceChars, encodedChars, removedChars, reductionPercent, codec: "text" };
 }
 
 export const FILE_BANNER_PREFIX = "__PI_VISUAL_CONTEXT_FILE__:";
 export function formatFileBanner(displayPath: string): string { return `${FILE_BANNER_PREFIX}${displayPath}`; }
-export type RenderInput = { path: string; displayPath: string; language: "Rust" | "C" | "Python" };
+export type RenderInput = { path: string; displayPath: string; language: "Rust" | "C" | "Python" | "Text" };
 export class RenderCancelled extends Error { constructor() { super("render cancelled"); } }
 export type RenderOptions = {
   beforeRasterize?: (pageCount: number, sourceChars: number) => Promise<boolean>;
@@ -267,7 +286,7 @@ async function cacheKey(inputs: RenderInput[], profile: VisualProfile): Promise<
     const bytes = await readFile(input.path);
     sourceBytes += bytes.length;
     sourceChars += bytes.toString("utf8").length;
-    sources.push({ displayPath: input.displayPath, language: input.language, bytesSha256: sha256(bytes) });
+    sources.push({ displayPath: input.displayPath, language: input.language, codec: input.language === "Text" ? "text" : input.language.toLowerCase(), bytesSha256: sha256(bytes) });
   }
   const template = await readFile(resolve(root, "typst/source.typ"));
   const font = await readFile(resolve(root, "assets/fonts/romulus/Romulus.ttf"));
@@ -330,7 +349,8 @@ export async function readPdfFonts(pdf: string): Promise<string[]> {
 async function compactFile(input: RenderInput, outDir: string, status: (text: string) => void): Promise<Compacted> {
   if (input.language === "Rust") return compactRust(input.path, outDir, status);
   if (input.language === "C") return compactC(input.path, outDir, status);
-  return compactPython(input.path, outDir, status);
+  if (input.language === "Python") return compactPython(input.path, outDir, status);
+  return compactText(input.path, outDir, status);
 }
 
 export type PdfRenderResult = {
@@ -345,7 +365,7 @@ export async function renderPdfPages(
   work: string,
   pageCount: number,
   profile: VisualProfile,
-  language: "Rust" | "C" | "Python" | "Mixed",
+  language: "Rust" | "C" | "Python" | "Text" | "Mixed",
   status: (text: string) => void,
   progressStart = 0,
   progressTotal = pageCount,
@@ -435,7 +455,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const languages = [...new Set(inputs.map((input) => input.language))];
     const language = languages.length === 1 ? languages[0] : "Mixed";
     const fontDir = resolve(root, "assets/fonts/romulus");
-    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Mixed"; fontsUsed: string[] }[];
+    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Text" | "Mixed"; fontsUsed: string[] }[];
     let typstMs = 0;
     let pdfinfoMs = 0;
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
@@ -485,8 +505,8 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const lastPage = renderedGroups.at(-1)!.finalPage;
     const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers, fontsUsed: group.fontsUsed }));
     const fontsUsed = [...new Set(prepared.flatMap((group) => group.fontsUsed))].sort();
-    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, fontsUsed, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
-    const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
+    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
+    const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, codec: item.value.codec, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
     if (cacheEnabled()) await publishCache(cacheDirectory, key, manifest, sourceManifests, images);
     return { images, manifest, sourceManifests };
   } finally {
