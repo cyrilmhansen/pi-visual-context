@@ -38,13 +38,15 @@ export type RenderManifest = {
     pageCount: number;
     pageDimensions: { width: number; height: number }[];
     workers: number;
+    fontsUsed?: string[];
   }[];
+  fontsUsed?: string[];
   git?: GitProvenance;
   gitRepository?: number | null;
   cache?: { schemaVersion: number; key: string; hit: boolean };
 };
 
-export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string; render: boolean; open: boolean } {
+export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string; render: boolean; open: boolean; visualPrompt: boolean } {
   if (!text.startsWith("@v ")) throw new Error("not a visual-context input");
   const rest = text.slice(3);
   const separator = rest.indexOf(" -- ");
@@ -54,11 +56,13 @@ export function parseVisualInput(text: string): { source: string; sources: strin
   let profile = "normal";
   let render = false;
   let open = false;
+  let visualPrompt = false;
   const sources: string[] = [];
   for (let index = 0; index < sourceArgs.length; index++) {
     const argument = sourceArgs[index];
     if (argument === "--render") render = true;
     else if (argument === "--open") open = true;
+    else if (argument === "--visual-prompt") visualPrompt = true;
     else if (argument === "--profile") {
       const value = sourceArgs[++index];
       if (!value) throw new Error("malformed @v profile syntax; use: --profile <name>");
@@ -70,7 +74,7 @@ export function parseVisualInput(text: string): { source: string; sources: strin
   for (const source of sources) {
     if (!/[*?\[]/.test(source) && !/\.(rs|c|h|cc|cpp|cxx|hpp|py)$/.test(source)) throw new Error(`unsupported source extension for "${source}"; supported extensions are .rs, .c, .h, and .py`);
   }
-  return { source: sources[0], sources, question, profile, render, open };
+  return { source: sources[0], sources, question, profile, render, open, visualPrompt };
 }
 
 async function trimGeometry(path: string, crop: string) {
@@ -118,8 +122,8 @@ async function compactC(sourcePath: string, outDir: string, status: (text: strin
   return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent };
 }
 
-async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Mixed") {
-  const text = `${language} | visual-context | ${page}/${total} | ${profile.name}`;
+async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Mixed", headerPrefix?: string) {
+  const text = headerPrefix ? `${headerPrefix} | ${page}/${total}` : `${language} | visual-context | ${page}/${total} | ${profile.name}`;
   const font = resolve(root, "assets/fonts/romulus/Romulus.ttf");
   const output = `${path}.header.png`;
   await run("magick", [path, "-gravity", "NorthWest", "-background", "white", "-splice", `0x${HEADER_HEIGHT}`, "-font", font, "-fill", "black", "-pointsize", "10", "-annotate", "+12+4", text, output]);
@@ -242,7 +246,7 @@ async function loadRomulusCodepoints(): Promise<Set<number>> {
   return parseFontCharset(stdout);
 }
 
-const CACHE_SCHEMA_VERSION = 1;
+const CACHE_SCHEMA_VERSION = 2;
 const PIPELINE_VERSION = "0.3.0-unicode-groups-1";
 const cacheEnabled = () => !["0", "false", "no", "off"].includes((process.env.PI_VISUAL_CONTEXT_CACHE ?? "1").toLowerCase());
 const sha256 = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
@@ -313,10 +317,66 @@ async function publishCache(directory: string, key: string, manifest: RenderMani
   }
 }
 
+export async function readPdfFonts(pdf: string): Promise<string[]> {
+  try {
+    const { stdout } = await run("pdffonts", [pdf]);
+    const names = stdout.split("\n").slice(2).map((line) => line.trim().split(/\s+/)[0]).filter((name) => name && name !== "name").map((name) => name.replace(/^[A-Z]{6}\+/, ""));
+    return [...new Set(names)].sort();
+  } catch {
+    return [];
+  }
+}
+
 async function compactFile(input: RenderInput, outDir: string, status: (text: string) => void): Promise<Compacted> {
   if (input.language === "Rust") return compactRust(input.path, outDir, status);
   if (input.language === "C") return compactC(input.path, outDir, status);
   return compactPython(input.path, outDir, status);
+}
+
+export type PdfRenderResult = {
+  images: Buffer[];
+  pageDimensions: { width: number; height: number }[];
+  finalPage: { width: number; height: number; columnsUsed: number; croppedRightPixels: number; croppedBottomPixels: number };
+  workers: number;
+};
+
+export async function renderPdfPages(
+  pdf: string,
+  work: string,
+  pageCount: number,
+  profile: VisualProfile,
+  language: "Rust" | "C" | "Python" | "Mixed",
+  status: (text: string) => void,
+  progressStart = 0,
+  progressTotal = pageCount,
+  headerPrefix?: string,
+): Promise<PdfRenderResult> {
+  const configuredWorkers = rasterWorkerCount(pageCount);
+  let completed = progressStart;
+  const groupWorkers = configuredWorkers;
+  const pageResults = await mapPages(pageCount, groupWorkers, async (pageIndex) => {
+    const pageWork = resolve(work, `page-${String(pageIndex + 1).padStart(3, "0")}`);
+    await mkdir(pageWork, { recursive: true });
+    const rasterPrefix = resolve(pageWork, "raster");
+    await run("pdftocairo", ["-png", "-r", "1152", "-f", String(pageIndex + 1), "-l", String(pageIndex + 1), pdf, rasterPrefix]);
+    const rasterPages = (await readdir(pageWork)).filter((name) => name.endsWith(".png"));
+    if (rasterPages.length !== 1) throw new Error(`renderer produced ${rasterPages.length} raster pages for page ${pageIndex + 1}`);
+    const input = resolve(pageWork, rasterPages[0]);
+    const output = resolve(pageWork, "final.png");
+    await run("magick", [input, "-filter", "Box", "-resize", "6.25%", output]);
+    await rm(input);
+    const { stdout: size } = await run("identify", ["-format", "%wx%h", output]);
+    if (size.trim() !== "1056x960") throw new Error(`renderer produced ${size.trim()}, expected 1056x960`);
+    await addHeader(output, pageIndex + 1, pageCount, profile, language, headerPrefix);
+    let finalPage = { width: 1056, height: HEADER_HEIGHT + 960, columnsUsed: 3, croppedRightPixels: 0, croppedBottomPixels: 0 };
+    if (pageIndex === pageCount - 1) finalPage = await cropFinalPage(output, profile);
+    const normalized = `${output}.normalized.png`;
+    await run("magick", [output, "-strip", "-define", "png:exclude-chunk=tIME", normalized]);
+    await rm(output);
+    await rename(normalized, output);
+    return { image: await readFile(output), dimensions: { width: finalPage.width, height: finalPage.height }, finalPage };
+  }, () => { completed++; status(`rasterizing ${completed}/${progressTotal}`); });
+  return { images: pageResults.map((page) => page.image), pageDimensions: pageResults.map((page) => page.dimensions), finalPage: pageResults[pageResults.length - 1].finalPage, workers: groupWorkers };
 }
 
 export async function renderSources(inputs: RenderInput[], status: (text: string) => void, profile: VisualProfile, options: RenderOptions = {}): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] }> {
@@ -375,7 +435,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const languages = [...new Set(inputs.map((input) => input.language))];
     const language = languages.length === 1 ? languages[0] : "Mixed";
     const fontDir = resolve(root, "assets/fonts/romulus");
-    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Mixed" }[];
+    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Mixed"; fontsUsed: string[] }[];
     let typstMs = 0;
     let pdfinfoMs = 0;
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
@@ -400,7 +460,8 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       pdfinfoMs += elapsedMs(pdfInfoStarted);
       const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
       if (!pageCount) throw new Error(`renderer produced no PDF pages for ${group.profile.name}`);
-      prepared.push({ group, work: groupWork, pdf, pageCount, language: group.items.length === 1 ? group.items[0].input.language : language });
+      const fontsUsed = await readPdfFonts(pdf);
+      prepared.push({ group, work: groupWork, pdf, pageCount, language: group.items.length === 1 ? group.items[0].input.language : language, fontsUsed });
     }
     timings.typst = typstMs;
     timings.pdfinfo = pdfinfoMs;
@@ -409,33 +470,12 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     if (options.beforeRasterize && !await options.beforeRasterize(totalPageCount, sourceChars)) throw new RenderCancelled();
     const configuredWorkers = rasterWorkerCount(totalPageCount);
     const rasterStarted = performance.now();
+    const renderedGroups: PdfRenderResult[] = [];
     let completed = 0;
-    const renderedGroups: { images: Buffer[]; pageDimensions: { width: number; height: number }[]; finalPage: { width: number; height: number; columnsUsed: number; croppedRightPixels: number; croppedBottomPixels: number }; workers: number }[] = [];
     for (const preparedGroup of prepared) {
-      const groupWorkers = Math.min(configuredWorkers, preparedGroup.pageCount);
-      const pageResults = await mapPages(preparedGroup.pageCount, groupWorkers, async (pageIndex) => {
-        const pageWork = resolve(preparedGroup.work, `page-${String(pageIndex + 1).padStart(3, "0")}`);
-        await mkdir(pageWork, { recursive: true });
-        const rasterPrefix = resolve(pageWork, "raster");
-        await run("pdftocairo", ["-png", "-r", "1152", "-f", String(pageIndex + 1), "-l", String(pageIndex + 1), preparedGroup.pdf, rasterPrefix]);
-        const rasterPages = (await readdir(pageWork)).filter((name) => name.endsWith(".png"));
-        if (rasterPages.length !== 1) throw new Error(`renderer produced ${rasterPages.length} raster pages for page ${pageIndex + 1}`);
-        const input = resolve(pageWork, rasterPages[0]);
-        const output = resolve(pageWork, "final.png");
-        await run("magick", [input, "-filter", "Box", "-resize", "6.25%", output]);
-        await rm(input);
-        const { stdout: size } = await run("identify", ["-format", "%wx%h", output]);
-        if (size.trim() !== "1056x960") throw new Error(`renderer produced ${size.trim()}, expected 1056x960`);
-        await addHeader(output, pageIndex + 1, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language);
-        let finalPage = { width: 1056, height: HEADER_HEIGHT + 960, columnsUsed: 3, croppedRightPixels: 0, croppedBottomPixels: 0 };
-        if (pageIndex === preparedGroup.pageCount - 1) finalPage = await cropFinalPage(output, preparedGroup.group.profile);
-        const normalized = `${output}.normalized.png`;
-        await run("magick", [output, "-strip", "-define", "png:exclude-chunk=tIME", normalized]);
-        await rm(output);
-        await rename(normalized, output);
-        return { image: await readFile(output), dimensions: { width: finalPage.width, height: finalPage.height }, finalPage };
-      }, () => { completed++; status(`rasterizing ${completed}/${totalPageCount}`); });
-      renderedGroups.push({ images: pageResults.map((page) => page.image), pageDimensions: pageResults.map((page) => page.dimensions), finalPage: pageResults[pageResults.length - 1].finalPage, workers: groupWorkers });
+      const result = await renderPdfPages(preparedGroup.pdf, preparedGroup.work, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language, status, completed, totalPageCount);
+      completed += result.images.length;
+      renderedGroups.push(result);
     }
     timings.rasterAndPostprocess = elapsedMs(rasterStarted);
     timings.workers = configuredWorkers;
@@ -443,8 +483,9 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const images = renderedGroups.flatMap((group) => group.images);
     const pageDimensions = renderedGroups.flatMap((group) => group.pageDimensions);
     const lastPage = renderedGroups.at(-1)!.finalPage;
-    const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers }));
-    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
+    const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers, fontsUsed: group.fontsUsed }));
+    const fontsUsed = [...new Set(prepared.flatMap((group) => group.fontsUsed))].sort();
+    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, fontsUsed, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
     const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
     if (cacheEnabled()) await publishCache(cacheDirectory, key, manifest, sourceManifests, images);
     return { images, manifest, sourceManifests };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import { openPreview } from "../src/preview.ts";
 import { VISUAL_CONTEXT_HELP } from "../src/help.ts";
 import { registerVisualContextCommand } from "../src/command.ts";
 import { collectGitProvenance } from "../src/git.ts";
+import { renderTask } from "../src/task.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -35,7 +36,21 @@ test("registers a local /visual-context help command without model work", async 
   assert.match(VISUAL_CONTEXT_HELP, /--render/);
   assert.match(VISUAL_CONTEXT_HELP, /--open/);
   assert.match(VISUAL_CONTEXT_HELP, /--profile/);
-  for (const text of [".rs", ".c", ".h", ".py", "**/*.py", "PI_VISUAL_CONTEXT_MAX_TABLETS"]) assert.match(VISUAL_CONTEXT_HELP, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  for (const text of [".rs", ".c", ".h", ".py", "**/*.py", "--visual-prompt", "PI_VISUAL_CONTEXT_CONFIRM_FILES", "PI_VISUAL_CONTEXT_MAX_TABLETS", "PI_VISUAL_CONTEXT_SHOW_USAGE", "PI_VISUAL_CONTEXT_CACHE", "PI_VISUAL_CONTEXT_RASTER_WORKERS"]) assert.match(VISUAL_CONTEXT_HELP, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+});
+
+test("Typst produces a PDF without a diagnostic for an unavailable glyph", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-missing-glyph-test-"));
+  const source = join(dir, "missing.txt");
+  const template = join(dir, "missing.typ");
+  const pdf = join(dir, "missing.pdf");
+  writeFileSync(source, "😀\n");
+  writeFileSync(template, `#set text(font: "Romulus", fallback: true)\n#text(read("missing.txt"))\n`);
+  const result = spawnSync("typst", ["compile", "--ignore-system-fonts", "--font-path", join(root, "assets/fonts/romulus"), template, pdf], { encoding: "utf8" });
+  assert.equal(result.status, 0);
+  assert.equal(result.stderr, "");
+  assert.ok(existsSync(pdf));
+  assert.match(execFileSync("pdffonts", [pdf], { encoding: "utf8" }), /Romulus/);
 });
 
 test("bundled Romulus contains all Python structural glyphs", () => {
@@ -67,7 +82,7 @@ test("classifies rendered glyphs from the Romulus cmap", () => {
 
 test("parses mono-file input and preserves question separator", () => {
   assert.deepEqual(parseVisualInput("@v src/foo.rs -- Explain -- this."), {
-    source: "src/foo.rs", sources: ["src/foo.rs"], question: "Explain -- this.", profile: "normal", render: false, open: false,
+    source: "src/foo.rs", sources: ["src/foo.rs"], question: "Explain -- this.", profile: "normal", render: false, open: false, visualPrompt: false,
   });
 });
 
@@ -80,9 +95,16 @@ test("parses ordered multi-file input with an explicit profile", () => {
 
 test("parses render mode, optional opening, and profile without a question", () => {
   assert.deepEqual(parseVisualInput("@v --render --open --profile conservative src/**/*.py"), {
-    source: "src/**/*.py", sources: ["src/**/*.py"], question: "", profile: "conservative", render: true, open: true,
+    source: "src/**/*.py", sources: ["src/**/*.py"], question: "", profile: "conservative", render: true, open: true, visualPrompt: false,
   });
   assert.equal(parseVisualInput("@v --render --profile conservative src/**/*.py -- Review this").render, true);
+});
+
+test("parses opt-in visual prompt mode without changing the question", () => {
+  const parsed = parseVisualInput("@v --visual-prompt --profile conservative src/a.py -- Explain the architecture.");
+  assert.equal(parsed.visualPrompt, true);
+  assert.equal(parsed.question, "Explain the architecture.");
+  assert.equal(parsed.profile, "conservative");
 });
 
 test("expands globs in argument order, sorts matches, and deduplicates", async () => {
@@ -322,6 +344,9 @@ test("mixed Unicode sources render normal before conservative groups", async () 
   assert.equal(first.manifest.renderGroups[1].pageCount >= 1, true);
   assert.equal(first.manifest.renderGroups[0].profile, "normal");
   assert.equal(first.manifest.renderGroups[1].profile, "conservative");
+  assert.ok(first.manifest.renderGroups.every((group) => Array.isArray(group.fontsUsed)));
+  assert.ok(first.manifest.renderGroups.every((group) => group.fontsUsed.includes("Romulus")));
+  assert.deepEqual(first.manifest.fontsUsed, [...new Set(first.manifest.fontsUsed)].sort((a, b) => a.localeCompare(b)));
   for (const [index, dimensions] of first.manifest.pageDimensions.entries()) {
     const imagePath = join(dir, `group-${index}.png`);
     writeFileSync(imagePath, first.images[index]);
@@ -331,6 +356,8 @@ test("mixed Unicode sources render normal before conservative groups", async () 
   }
   const second = await renderSources(inputs, () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache") });
   assert.equal(second.manifest.cache.hit, true);
+  assert.deepEqual(second.manifest.fontsUsed, first.manifest.fontsUsed);
+  assert.deepEqual(second.manifest.renderGroups.map((group) => group.fontsUsed), first.manifest.renderGroups.map((group) => group.fontsUsed));
   assert.deepEqual(second.images, first.images);
   const conservative = await renderSources(inputs, () => {}, getVisualProfile("conservative"), { cacheDirectory: join(dir, "conservative-cache") });
   assert.equal(conservative.manifest.renderGroups.length, 1);
@@ -347,6 +374,7 @@ test("final PNG cache hits without invoking layout or rasterization", async () =
   const firstStatuses = [];
   const first = await renderSources(input, (status) => firstStatuses.push(status), getVisualProfile("normal"), { cacheDirectory: cache });
   assert.equal(first.manifest.cache.hit, false);
+  assert.deepEqual(first.manifest.fontsUsed, ["Romulus"]);
   assert.ok(first.manifest.timingsMs.compact >= 0);
   assert.ok(first.manifest.timingsMs.typst >= 0);
   assert.ok(first.manifest.timingsMs.pdfinfo >= 0);
@@ -458,6 +486,54 @@ test("Git metadata changes do not invalidate the render cache", async () => {
   assert.equal(second.manifest.cache.key, first.manifest.cache.key);
   assert.equal(second.manifest.git.repositories[0].dirty, true);
   assert.deepEqual(second.images, first.images);
+});
+
+test("visual task renderer paginates, caches, and preserves Unicode", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-task-test-"));
+  const cache = join(dir, "task-cache");
+  const short = "Explain français 日本語 😀 and the source invariants.";
+  const first = await renderTask(short, () => {}, { cacheDirectory: cache });
+  assert.equal(first.manifest.cache.hit, false);
+  assert.equal(first.manifest.pageCount, 1);
+  assert.equal(first.manifest.bytes, Buffer.byteLength(short));
+  assert.ok(first.manifest.fontsUsed.includes("Romulus"));
+  assert.deepEqual(first.manifest.fontsUsed, [...new Set(first.manifest.fontsUsed)].sort((a, b) => a.localeCompare(b)));
+  assert.ok(first.manifest.timingsMs.layout >= 0);
+  const hit = await renderTask(short, () => {}, { cacheDirectory: cache });
+  assert.equal(hit.manifest.cache.hit, true);
+  assert.deepEqual(hit.manifest.fontsUsed, first.manifest.fontsUsed);
+  assert.deepEqual(hit.images, first.images);
+  const previousCache = process.env.PI_VISUAL_CONTEXT_CACHE;
+  process.env.PI_VISUAL_CONTEXT_CACHE = "0";
+  const disabled = await renderTask(short, () => {}, { cacheDirectory: join(dir, "disabled-cache") });
+  const disabledAgain = await renderTask(short, () => {}, { cacheDirectory: join(dir, "disabled-cache") });
+  if (previousCache === undefined) delete process.env.PI_VISUAL_CONTEXT_CACHE;
+  else process.env.PI_VISUAL_CONTEXT_CACHE = previousCache;
+  assert.equal(disabled.manifest.cache.hit, false);
+  assert.equal(disabledAgain.manifest.cache.hit, false);
+  rmSync(join(cache, first.manifest.cache.key, "task-001.png"));
+  const repaired = await renderTask(short, () => {}, { cacheDirectory: cache });
+  assert.equal(repaired.manifest.cache.hit, false);
+  const long = Array.from({ length: 160 }, (_, index) => `${index + 1}. Explain the invariant and the relationship between module ${index}.`).join("\n");
+  const paged = await renderTask(long, () => {}, { cacheDirectory: join(dir, "long-cache") });
+  assert.ok(paged.manifest.pageCount > 1);
+  const previousWorkers = process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+  try {
+    process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "1";
+    const one = await renderTask(long, () => {}, { cacheDirectory: join(dir, "workers-1") });
+    process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "4";
+    const four = await renderTask(long, () => {}, { cacheDirectory: join(dir, "workers-4") });
+    assert.deepEqual(four.images, one.images);
+  } finally {
+    if (previousWorkers === undefined) delete process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+    else process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = previousWorkers;
+  }
+});
+
+test("visual task manifest keeps task pages before source pages", () => {
+  const task = { pages: ["task-001.png", "task-002.png"] };
+  const source = { pages: ["source-001.png", "source-002.png"] };
+  assert.deepEqual([...task.pages, ...source.pages], ["task-001.png", "task-002.png", "source-001.png", "source-002.png"]);
 });
 
 test("raster worker policy is bounded and page mapping preserves order", async () => {

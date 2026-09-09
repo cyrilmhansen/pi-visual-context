@@ -1,29 +1,29 @@
 export const VISUAL_CONTEXT_HELP = `pi-visual-context
 
-Context:
+Usage:
   @v file.rs -- question
   @v foo.h foo.c -- question
   @v src/**/*.py -- question
 
+Visual prompt (opt-in):
+  @v --visual-prompt src/**/*.py -- long question
+  Render the task as visual tablets; short prompts are usually better as text.
+
 Preview:
   @v --render src/**/*.py
   @v --render --open src/**/*.py
+  @v --visual-prompt --render src/**/*.py -- long question
 
 Profiles:
   @v --profile conservative file.py -- question
-  normal
-  conservative
+  normal | conservative
 
-Languages:
-  Rust: .rs
-  C: .c .h
-  Python: .py
+Languages: .rs .c .h .py
+Options: --visual-prompt  --render  --open  --profile conservative
 
-Globs:
-  *.py
-  **/*.py
-
-Variables:
+Environment:
   PI_VISUAL_CONTEXT_CONFIRM_FILES
   PI_VISUAL_CONTEXT_MAX_TABLETS
-  PI_VISUAL_CONTEXT_SHOW_USAGE`;
+  PI_VISUAL_CONTEXT_SHOW_USAGE
+  PI_VISUAL_CONTEXT_CACHE
+  PI_VISUAL_CONTEXT_RASTER_WORKERS`;

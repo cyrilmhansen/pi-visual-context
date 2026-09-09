@@ -109,6 +109,8 @@ The extension accepts:
 @v src/**/*.py helper.rs -- Explain how these components interact.
 @v --render --profile conservative src/**/*.py
 @v --render --open src/**/*.py
+@v --visual-prompt src/**/*.py -- Explain the architecture in detail.
+@v --visual-prompt --render src/**/*.py -- Explain the architecture in detail.
 @v external/opl3/opl3.h external/opl3/opl3.c -- Explain how this API works.
 ```
 
@@ -154,6 +156,7 @@ Current scope:
 - deterministic final-PNG cache in `.pi/visual-context/cache/`, keyed by source bytes, order, display names, profile, template, font, and renderer parameters; Git provenance is manifest-only and does not affect the key; set `PI_VISUAL_CONTEXT_CACHE=0` to disable it
 - bounded parallel rasterization and per-page post-processing, defaulting to at most 4 workers; override with `PI_VISUAL_CONTEXT_RASTER_WORKERS`
 - deterministic Romulus cmap classification: compatible files render in the normal group, while files containing missing glyphs render in the conservative fallback group
+- best-effort `fontsUsed` metadata extracted from each rendered PDF, including TASK and source render groups
 
 Source patterns preserve argument order; each glob is sorted lexically, duplicates are removed at first occurrence, and a glob with no regular-file matches is an error. Python uses `¶` for logical line breaks, including LF characters inside multiline strings, and `N»` for logical indentation depth (`»` is the bundled-font equivalent of `⇥`); continuation indentation is omitted. Literal `\\n` sequences remain unchanged. The C and Python codecs are lexical only: they do not preprocess, expand macros, reformat, or rewrite source. Comments, directives, macros, strings, characters, indentation, and significant newlines are preserved. Other languages, indexing, and archive features remain out of scope.
 
@@ -161,18 +164,18 @@ Source patterns preserve argument order; each glob is sorted lexically, duplicat
 
 Rasterization and final PNG post-processing run page-by-page in a bounded worker pool (default maximum: 4), while preserving deterministic page order and bytes. Set `PI_VISUAL_CONTEXT_RASTER_WORKERS=1` for the sequential reference pipeline.
 
-When the requested profile is `normal`, each compacted file is classified using the bundled Romulus cmap, including its visual filename. Romulus-compatible files are rendered first with the normal profile; files requiring fallback glyphs are rendered afterward with the existing conservative profile. An explicit `--profile conservative` keeps the entire request conservative. Typst fallback fonts are used only for the latter group.
+When the requested profile is `normal`, each compacted file is classified using the bundled Romulus cmap, including its visual filename. Romulus-compatible files are rendered first with the normal profile; files requiring fallback glyphs are rendered afterward with the existing conservative profile. An explicit `--profile conservative` keeps the entire request conservative. Romulus is the only bundled font. Typst fallback is best-effort and uses fonts installed on the host, so Unicode appearance can differ between machines. With system fonts disabled, the installed Typst version still exits successfully and produces a PDF for an unavailable emoji glyph, without a reliable missing-glyph diagnostic; the project therefore does not scan pixels or system cmaps for tofu detection. `fontsUsed` records the normalized font names reported by `pdffonts` for each actual PDF; an empty list means that diagnostic was unavailable.
 
 Debug manifests also include best-effort local Git provenance for each distinct repository. It is informational, supports files outside Git and multiple repositories, and is refreshed on cache hits without invalidating the rendered-image cache.
 
-The final rendered PNGs are cached locally after a successful render. Cache entries are content-addressed and invalidated automatically when any source, profile, visual name, template, font, codec convention, or renderer parameter changes. Debug output remains per invocation; set `PI_VISUAL_CONTEXT_CACHE=0` (also accepts `false`, `no`, or `off`) to disable the cache.
+The final rendered PNGs are cached locally after a successful render. Source entries remain in `.pi/visual-context/cache/`; opt-in TASK entries use the separate `.pi/visual-context/cache/task/` namespace. Cache entries are content-addressed and invalidated automatically when any source, profile, visual name, template, font, codec convention, or renderer parameter changes. Opt-in `--visual-prompt` renders the natural-language question as separate TASK tablets before the SOURCE tablets; its cache is keyed only by the exact prompt and task renderer identity. For short questions, the historical text mode is usually more efficient. The cache key does not fingerprint the host's system fallback-font inventory: if installed fonts change, use `PI_VISUAL_CONTEXT_CACHE=0` once or purge `.pi/visual-context/cache/` and `.pi/visual-context/cache/task/`. Debug output remains per invocation; set `PI_VISUAL_CONTEXT_CACHE=0` (also accepts `false`, `no`, or `off`) to disable both caches.
 
 The current prototype pipeline expects:
 
 - Node.js
 - Pi
 - Typst
-- Poppler (`pdftocairo`, `pdftotext`)
+- Poppler (`pdftocairo`, `pdftotext`, and `pdffonts` for render diagnostics)
 - ImageMagick
 - Rust tooling for the Rust and C lexical helpers
 
