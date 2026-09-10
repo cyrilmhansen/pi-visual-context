@@ -2,319 +2,259 @@
 
 ## Vue d’ensemble
 
-| Version | Objectif | Contenu principal | Critère de sortie |
-|---|---|---|---|
-| **0.1 — Prototype autonome** | Publier quelque chose qui fonctionne réellement | Extension Pi, `rust-strip-lex` embarqué, profils `normal`/`conservative`, rendu Typst, recadrage de la dernière page, en-têtes, artefacts de debug, usage des tokens, script de release | Un clone peut être construit et `@v` fonctionne localement sans dépendre du repo POC |
-| **0.2 — Python dense, preview et premier usage projet réel** | Rendre `@v` immédiatement utile sur Atlas Agent Python | Codec Python dense (`¶` y compris dans les chaînes multilignes, profondeur logique), globs déterministes, flux multifichier continu, bandeaux graphiques, confirmations, `--render`/`--open`, mélange Rust/C/Python | Fixtures codec/rendu/garde-fous déterministes, build release, `npm pack`, smoke local sans LLM |
-| **0.3 — Cache, Unicode, raster parallèle et prompt visuel** | Éviter les recalculs, accélérer le rendu et structurer la tâche visuelle | Cache source/task indépendant, prompt visuel TASK-only ou TASK+SOURCE, fallback texte UTF-8 générique, timings muraux, groupes Romulus/fallback, métadonnées `fontsUsed`, aide `/visual-context`, rasterisation et post-traitement par page | Fichier inchangé → aucun nouveau rendu ; PNG identiques avec 1 ou plusieurs workers ; fallback système best-effort documenté |
-| **0.4a — Tablettes SOURCE adressables** ✓ | Relier chaque tablette aux lignes originales | IDs VC, provenance par tablette/source, plages 1-based inclusives, provenance conservée sur cache HIT | Chaque tablette SOURCE est identifiable avec ses fichiers et lignes ; TASK ne renumérote pas SOURCE |
-| **0.4c½ — Identité VC persistante par projet** ✓ | Conserver l’identité des tablettes entre les rendus | IDs projet-scoped monotones, état `.pi/visual-context/project.json`, allocation sous lock, cache HIT/MISS et invalidation compatibles | Un rendu identique conserve ses IDs ; un snapshot modifié reçoit une nouvelle série sans collision |
-| **0.4d — Navigation sans réinjection** ✓ | Référencer le Source Context Set déjà injecté | `--tablet`/`--symbol`, résolution locale stricte, état scoped à la session Pi, payload texte sans image | Une seule SOURCE par conversation ; navigation sans rendu, cache PNG ni nouvelle ImageContent |
-| **0.4e — Consultation locale de l’index symbolique** ✓ | Inspecter et désambiguïser les symboles du snapshot actif | `--symbols` et recherche locale bornée, sans modèle ni rendu | Résultats déterministes issus uniquement de `source.symbols` |
-| **0.4b — Index texte minimal** ✓ | Rendre les tablettes SOURCE nommables dans le contexte texte | Projection compacte de `source.tablets`, noms visuels, lignes originales, index TASK+SOURCE sans duplication du prompt | Le texte contient exactement l’index VC correspondant aux images SOURCE |
-| **0.4c — Symbol anchors ↔ VC** ✓ | Relier les définitions navigables aux lignes originales et aux tablettes | Extraction conservative Python/Rust/C, `source.symbols[]`, mapping exclusif via `source.tablets[]`, aucun enrichissement du payload texte | Le manifest répond à « où est ce symbole ? » sans nouvelle pagination ni navigation interactive |
-| **0.5 — Codec visuel v1** | Formaliser ce qui est encodé | Représentation auto-descriptive, métadonnées dans l’image, symboles LF/TAB, profils, version du codec | Format reproductible et versionné |
-| **0.6 — Coûts et cache provider** | Réduire les coûts au-delà du rendu local | Prompt cache, métriques de tokens d’entrée, optimisations provider | Mesures reproductibles sans changer les pixels |
-| **0.7 — Expérimentations de programmation visuelle** | Exploiter réellement le canal graphique | Couleurs catégorielles, boîtes, relations, références spatiales, graphes, annotations | Gains au-delà du simple texte rasterisé |
-| **1.0 — Visual context layer** | Faire de l’extension un composant générique | API stable, plusieurs langages, plugin Pi propre, éventuellement Atlas | Usage quotidien stable et documentation publique |
+Le projet fournit actuellement une extension Pi déterministe de représentation
+visuelle de sources. La série 0.4 est terminée. La prochaine étape n’est pas
+un nouveau codec : c’est la séparation d’un cœur réutilisable, puis son usage
+headless par Pi et Atlas Agent.
 
----
+| Version | Objectif | État / critère de sortie |
+|---|---|---|
+| **0.1 — Prototype autonome** ✓ | Rendre le pipeline local fonctionnel | Extension Pi, codecs Rust/C, Typst, PNG, crop, profils et packaging |
+| **0.2 — Python et premier usage réel** ✓ | Rendre `@v` utile sur des projets réels | Codec Python dense, globs déterministes, multifichier, confirmations, preview et fallback UTF-8 |
+| **0.3 — Cache, Unicode, raster parallèle et prompt visuel** ✓ | Éviter les recalculs et structurer le contexte visuel | Cache SOURCE/TASK, TASK-only/TASK+SOURCE, timings, groupes de profils, workers bornés |
+| **0.4a — Tablettes SOURCE adressables** ✓ | Relier chaque tablette aux lignes originales | VC-id, fichier, nom visuel et plages 1-based conservés dans les manifests |
+| **0.4b — Index texte minimal** ✓ | Nommer les tablettes dans le contexte texte | `tabletIndex` dérivé de `source.tablets`, sans duplication du prompt source |
+| **0.4c — Symbol anchors ↔ VC** ✓ | Relier les symboles aux lignes et tablettes | Extraction best-effort Python/Rust/C, `source.symbols[]`, mapping canonique |
+| **0.4c½ — Identité VC persistante par projet** ✓ | Conserver l’identité entre les rendus | IDs monotones scoped projet, `project.json`, allocation atomique et cache compatible |
+| **0.4d — Navigation sans réinjection** ✓ | Référencer le contexte SOURCE déjà injecté | Un Source Context Set par conversation, `--tablet`/`--symbol`, texte uniquement |
+| **0.4e — Consultation locale de l’index symbolique** ✓ | Inspecter et désambiguïser le snapshot actif | `--symbols`, recherche locale bornée, sans modèle ni rendu |
+| **0.5a — Core boundary** | Séparer le moteur du frontend Pi | Pipeline SOURCE invocable par API TypeScript sans charger Pi |
+| **0.5b — Portable Source Context contract** | Définir un contrat machine versionné | Snapshot compréhensible par un consommateur externe, indépendant de Pi et Typst |
+| **0.5c — Headless CLI** | Utiliser le cœur sans Pi | CLI JSON déterministe, diagnostics sur stderr, aucun modèle ni état conversationnel |
+| **0.5d — Atlas Agent adapter** | Rendre le service utilisable par Atlas Agent | Atlas Agent récupère snapshots, artefacts et provenance dans son infrastructure qualifiée |
+| **0.5e — Trace / observabilité Atlas Agent** | Rendre l’exécution observable | Event stream exploitable en console, JSONL durable et replay/post-mortem |
+| **0.6 — Dogfooding Atlas Agent** | Piloter la suite par l’usage réel | Frictions répétées collectées et priorisées avant les nouvelles fonctionnalités structurantes |
+| **0.7 — Visual IR et extensions** | Explorer les représentations plus riches | Couleurs, scopes, relations, graphes, annotations, formats et providers selon les besoins observés |
 
-## État d’avancement
+## État actuel : 0.4 terminé
 
-Le prototype autonome 0.1 est maintenant implémenté et validé sans appel LLM : build Rust, profils, rendu, crop, en-têtes, artefacts de debug, usage et packaging sont en place.
+Le pipeline SOURCE produit des tablettes adressables, persistantes et
+provenancées. Un rendu identique conserve ses PNG et ses IDs ; un snapshot
+modifié reçoit une nouvelle série monotone. `source.tablets[]` est la source
+canonique de la provenance, et `tabletIndex` est sa projection compacte.
 
-Le support multifichier de base, les codecs Rust/C et la commande Pi `/visual-context` d’aide/découverte sont également implémentés. Le cache déterministe, l’instrumentation temporelle et le raster/post-traitement parallèle par page constituent le scope 0.3 ; les tablettes adressables, l’index texte minimal, les symbol anchors conservateurs et l’identité VC persistante par projet sont désormais validés en 0.4a–0.4c½. La navigation interactive reste future.
+Les symbol anchors sont conservateurs et best-effort. Python dispose d’une
+extraction structurelle ; Rust et C couvrent un sous-ensemble lexical. Les
+omissions sont préférées aux faux positifs. Le texte UTF-8 générique reste
+supporté, mais ne produit pas de symboles.
 
-## 0.1 — Terminé
-
-Le scope livré est :
-
-```text
-@v path.rs -- question
-@v --profile conservative path.rs -- question
-@v foo.h foo.c -- question
-```
-
-avec les profils suivants :
-
-```text
-normal
-  Romulus
-  scale 1.00
-  margin 12
-  gutter 24
-
-conservative
-  Romulus
-  scale 1.05
-  margin 64
-  gutter 32
-```
-
-### Fonctionnalités déjà acquises
-
-- Rust `strip-lex` et codec lexical C
-- rendu Typst
-- pages PNG
-- recadrage de la dernière page
-- en-tête visuel
-- support multifichier dans un même message
-- `detail=original` sélectif
-- `ImageContent` Pi
-- persistance de conversation Pi
-- artefacts de debug
-- usage par requête `@v`
-
-Ces éléments sont désormais terminés. Le prochain travail porte sur l’usage réel du système, pas sur de nouveaux benchmarks.
-
----
-
-## 0.2 — Python et premier usage réel
-
-Le prochain incrément ajoute le codec Python lexical dense, les globs déterministes et le mode `@v --render`/`--open` sans appel modèle, construit avec `rustpython-parser` 0.4 et son feature `full-lexer`. `¶` représente les LF et `N»` la profondeur logique (`»` est le glyphe disponible pour `⇥`). Les fichiers sont réunis dans un document Typst continu avec bandeaux, tandis que les confirmations séparent le coût local des fichiers du coût multimodal des tablettes.
-
-## Distribution multiplateforme — notes historiques
-
-La distribution de base est maintenant résolue : Romulus est embarqué avec son attribution, le helper Rust/C est fourni en source et les scripts de build/package sont présents.
-
-Les binaires précompilés restent hors scope. Trois possibilités restent envisageables pour de futures distributions multiplateformes, par ordre de préférence :
-
-1. licence compatible → inclure Romulus ;
-2. licence non redistribuable → demander à l’utilisateur de fournir la police ;
-3. remplacer Romulus par une police redistribuable ayant des propriétés proches.
-
-Je ne convertirais pas le helper Rust en TypeScript. Pour une première publication :
+Le premier envoi SOURCE établit un unique **Source Context Set** dans la
+conversation Pi. Il contient notamment les tablettes, le `tabletIndex`, les
+symboles et l’identité du snapshot. Les commandes suivantes sont locales :
 
 ```text
-package npm
-   +
-source Rust inclus
-   +
-cargo build
+@v --tablet PREFIX-VC-000123 -- question
+@v --symbol Executor.run -- question
+@v --symbols
+@v --symbols run
 ```
 
-est tout à fait acceptable.
+`--tablet`, `--symbol` et `--symbols` ne réinjectent pas d’image et ne
+relancent pas le rendu. Une seconde injection SOURCE est refusée dans la même
+conversation. Les prompts TASK-only et les previews restent indépendants du
+contexte SOURCE.
 
-Plus tard seulement :
+La persistance projet (`project.json`) et la persistance conversationnelle Pi
+sont distinctes :
 
 ```text
-linux-x64
-linux-arm64
-macos-arm64
-windows-x64
+cache de rendu / identité projet  → éviter un nouveau rendu lors d’une future injection
+état de session Pi                → savoir quel snapshot est actif dans cette conversation
+cache provider                    → responsabilité du provider
 ```
 
-avec des binaires précompilés dans les releases.
+Si une compaction Pi retire les anciennes images du contexte modèle, 0.4 ne
+les réinjecte pas automatiquement. La navigation suppose que les images
+référencées sont encore conservées par le contexte effectif.
 
----
+## 0.5 — Modularisation et intégration headless
 
-## Expériences réelles — notes historiques
+### 0.5a — Core boundary
 
-C’est probablement l’étape la plus importante après la release.
+Le moteur doit être séparé du frontend Pi sans déplacer prématurément les
+responsabilités de session ou d’UX.
 
-On a déjà obtenu :
+Architecture cible :
 
 ```text
-serde_json/src/de.rs
-86.8k caractères source
-70.3k caractères encodés
-4 images
-4.4k tokens d’entrée
-1 appel Sol Medium
-réponse architecturale cohérente
+visual-context core
+    ├── préparation des sources
+    ├── codecs
+    ├── Typst / raster
+    ├── cache
+    ├── identité VC persistante
+    ├── provenance
+    ├── symboles
+    └── primitives d’index et de navigation
+
+          ┌───────────────┴───────────────┐
+          │                               │
+      Pi adapter                    headless adapter
 ```
 
-Je ne chercherais plus à optimiser `gutter=22` contre `gutter=24`.
+Le core doit être appelable par une API TypeScript sans charger Pi. L’adapter
+Pi conserve ce qui appartient réellement à Pi : parser et UX `@v`, widgets,
+statuts, confirmations, lifecycle de session, `appendEntry`, `ImageContent` et
+hooks provider.
 
-Les tests intéressants deviennent :
+### 0.5b — Portable Source Context contract
 
-- « explique ce fichier » ;
-- « où est gérée telle propriété ? » ;
-- « quels invariants relient ces deux portions ? » ;
-- « vois-tu un bug potentiel ? » ;
-- « compare ces deux fichiers » ;
-- « propose une modification ».
-
-Puis surtout une deuxième question dans la même conversation, sans réinjecter le contexte, pour comprendre comment Pi, la session et le provider réutilisent les images.
-
-C’est là qu’on étudiera proprement le cache de conversation de Pi.
-
----
-
-## 0.4 — Navigation visuelle
-
-Le support multifichier de base est terminé : plusieurs fichiers `.rs`, `.c` et `.h` peuvent être rendus indépendamment dans un seul message, dans l’ordre fourni. Le Source Context Set est maintenant injecté une seule fois par conversation ; `--tablet` et `--symbol` produisent uniquement des références textuelles locales. La compaction Pi peut toutefois retirer les images anciennes du contexte, cas que 0.4d ne répare pas.
-
-L’interface naturelle pour une injection initiale reste :
+Définir un contrat portable et versionné pour un Source Context Snapshot. Il
+devra pouvoir contenir, selon le besoin réel :
 
 ```text
-@v src/foo.rs src/bar.rs -- question
+schemaVersion
+sourceCacheKey / identité du snapshot
+projectPrefix
+tablets
+tabletIndex
+symbols
+symbolDiagnostics
+provenance
+metrics
+références d’images et d’artefacts
 ```
 
-puis :
+Le manifest historique de debug Pi ne doit pas devenir accidentellement l’API
+publique. Un consommateur externe doit comprendre le snapshot sans connaître
+Pi, Typst ou les détails internes du cache.
+
+### 0.5c — Headless CLI
+
+Interface conceptuelle :
 
 ```text
-@v src/
+pvc prepare ...
+pvc resolve-tablet ...
+pvc resolve-symbol ...
+pvc symbols ...
 ```
 
-Mais je n’enverrais jamais naïvement tout un dépôt.
+La sortie machine-readable va sur stdout ; progrès et diagnostics vont sur
+stderr. Le CLI n’appelle aucun modèle, ne possède aucun état conversationnel et
+produit les mêmes résultats déterministes que le core utilisé par Pi.
 
-Il faut plutôt introduire une représentation légère parallèle :
+Critère : un programme Python ou Rust peut utiliser visual-context comme outil
+externe sans charger l’environnement Pi.
+
+### 0.5d — Atlas Agent adapter
+
+pi-visual-context devient un service spécialisé consommable par Atlas Agent.
+Il produit des observations, snapshots, artefacts et provenance ; il ne décide
+pas de leur signification ni de leur persistance sémantique.
 
 ```text
-source canonique texte
-        │
-        ├── index noms/symboles/fichiers
-        │
-        └── pages visuelles
+pi-visual-context  → représentation visuelle, snapshots, artefacts, provenance
+Atlas Agent        → autorisation, exécution, isolation, qualification, journal, matérialisation
+Atlas              → interprétation, coordination, décision et connaissance éventuelle
 ```
 
-Le modèle peut alors savoir :
+Atlas Agent doit pouvoir exécuter le visual-context headless dans son
+infrastructure qualifiée et récupérer le résultat sans faire de PVC une couche
+sémantique Atlas ni le propriétaire du graphe Atlas.
+
+### 0.5e — Trace / observabilité Atlas Agent
+
+Cette étape concerne l’event stream du runtime Atlas Agent, pas un système de
+trace propre à PVC. Il doit rendre visibles, lorsque pertinents :
 
 ```text
-page VC-013
-file src/de.rs
-symbols around parse_exponent_overflow
+generation.start/end
+model.request/response
+tool.request
+tool.accepted
+tool.result/error
+artifact
+timing
+agent/sub-agent identity
 ```
 
-et demander du texte exact uniquement lorsqu’il doit modifier quelque chose.
+La même séquence doit pouvoir alimenter une console/TUI, un JSONL durable et
+un mécanisme de replay ou post-mortem. PVC doit devenir un premier outil dont
+les artefacts et durées sont réellement visibles dans cette timeline.
 
-C’est la séparation que nous avions déjà esquissée :
+## 0.6 — Dogfooding Atlas Agent
 
-> visuel pour la compréhension globale, texte pour l’adressage exact et l’édition.
-
----
-
-## 0.5 — Rendre les « tablettes » réellement auto-descriptives
-
-L’en-tête que nous ajoutons maintenant n’est que le début.
-
-Une page pourrait progressivement encoder :
-
-- la version du codec ;
-- le langage ;
-- le chemin relatif au dépôt ;
-- le hash de la source ;
-- la page `n/N` ;
-- le profil ;
-- la plage de source ou de symboles.
-
-Mais autant que possible dans le canal visuel, et non en répétant cela dans les tokens texte.
-
-On arrive alors à l’idée discutée des « tablettes » :
+Après 0.5e, ne pas empiler automatiquement de gros features dans PVC. Utiliser
+Atlas Agent et pi-visual-context sur de vrais travaux, puis enregistrer les
+frictions avec une structure simple :
 
 ```text
-source canonique
-     ↓
-visual-context codec
-     ↓
-tablettes dérivées, immuables, adressables
+task
+snapshot
+action
+expected affordance
+observed problem
+category
+possible fix
 ```
 
-Une tablette pourrait être conservée, indexée, réutilisée et éventuellement avoir plusieurs « éditions » selon le modèle :
+Catégories utiles :
 
 ```text
-normal
-conservative
-dense
+missing-context, navigation, layout, symbol-index,
+unsupported-language, unicode, cache, context-window,
+latency, agent-decision, observability, provider-behavior
 ```
 
----
+La roadmap suivante doit être pilotée par des problèmes répétés observés en
+usage, et non uniquement par des fonctionnalités plausibles à l’avance.
 
-## 0.6 — Cache
+## 0.7 — Visual IR et extensions
 
-C’est seulement à ce moment-là que je construirais le cache propre :
+Les expérimentations ambitieuses sont volontairement repoussées ici :
+
+- représentation visuelle plus formalisée et visual IR ;
+- couleurs sémantiques, scopes et encadrements ;
+- relations spatiales, graphes et annotations ;
+- images natives et formats PDF/SVG/Mermaid/Graphviz ;
+- documents convertibles ;
+- providers, codecs ou capabilities externes ;
+- éventuel registry de capabilities.
+
+L’ordre de ces sujets ne sera pas décidé avant le dogfooding 0.6.
+
+## Frontières et règle de convergence
+
+Les responsabilités restent séparées :
 
 ```text
-SHA256(
-  source bytes
-  + codec version
-  + profile
-  + renderer version
-)
-→ pages
+Pi
+  frontend, UX et lifecycle de conversation
+
+visual-context core
+  observation et représentation visuelle déterministe
+
+Atlas Agent
+  exécution, isolation, qualification, journal et matérialisation
+
+Atlas
+  sémantique, interprétation, coordination et décision
 ```
 
-Cela couvre :
+Avant le dogfooding, ne pas construire un framework général de providers. La
+priorité est d’avoir un core et deux consommateurs réels : Pi et Atlas Agent.
+Les abstractions communes ne seront généralisées qu’après avoir été révélées
+par ces deux usages.
 
-- la réutilisation entre les tours ;
-- la réutilisation entre les sessions ;
-- la reprise de Pi ;
-- Atlas plus tard ;
-- l’absence de nouveau rendu pour un fichier inchangé.
+Après 0.5e, une fonctionnalité structurante de visual-context doit idéalement
+être justifiée par au moins un des éléments suivants :
 
-À distinguer clairement de :
+- friction répétée en usage réel ;
+- limitation mesurée ;
+- besoin concret de Pi ou d’Atlas Agent ;
+- invariant architectural nécessaire.
 
-```text
-cache fichier rendu       ← notre extension
-session persistence       ← Pi
-prompt/input cache        ← provider
-```
+Éviter les fonctionnalités ajoutées uniquement parce qu’elles sont plausibles.
 
-L’UI pourrait finir par montrer :
+## Notes historiques conservées
 
-```text
-visual-context:
-4 pages · 70.3k chars
-render cache hit
-↑ 4.4k · cache R 3.9k
-```
+Les premiers essais ont validé le rendu multifichier, les codecs Rust/C/Python,
+le fallback UTF-8, les profils Romulus et le cache déterministe. Les anciens
+résultats de benchmark et les explorations de typographie ont servi à choisir
+le pipeline actuel ; ils ne constituent plus des milestones futurs.
 
----
-
-## 0.7 — Dépasser le simple « code imprimé »
-
-C’est là que le projet devient réellement original.
-
-Une fois le pipeline stable, on pourra essayer des choses qu’un fichier texte ne peut pas exprimer aussi efficacement :
-
-- couleurs = catégories syntaxiques ;
-- encadrements = scopes ;
-- traits = relations ;
-- glyphes = types de symboles ;
-- zones = modules ;
-- annotations marginales ;
-- références spatiales.
-
-Le principe que nous avions formulé reste bon :
-
-> Tout élément graphique doit avoir une fonction symbolique.
-
-Pas de décoration.
-
-Il faudra aussi rester prudent avec la couleur : notre ancien essai de multiplexage RGB n’avait pas fonctionné, mais cela ne dit rien contre une palette simple, spatialement séparée et sémantique.
-
----
-
-## Hors scope pour l’instant
-
-- ❌ optimisation supplémentaire de la typographie ;
-- ❌ nouveaux benchmarks Astra massifs ;
-- ❌ support Python/TypeScript ;
-- ❌ Atlas ;
-- ❌ graphes ;
-- ❌ couleurs ;
-- ❌ vectoriel ;
-- ❌ cache sophistiqué ;
-- ❌ binaires Rust multiplateformes.
-
-Le chemin critique est plutôt :
-
-```text
-maintenant
-   ↓
-repo autonome
-   ↓
-release 0.1
-   ↓
-vrais usages Pi
-   ↓
-navigation + persistance
-   ↓
-codec visuel formalisé
-   ↓
-visual IR plus riche
-```
-
-Je pense que c’est la bonne manière de converger sans perdre l’ambition initiale : la version actuelle est déjà suffisamment intéressante pour être publiée et utilisée ; les idées plus radicales deviennent des étapes explicites de la roadmap plutôt que des fonctionnalités que l’on essaie de faire entrer dans le MVP.
+La distribution multiplateforme complète et les binaires précompilés ne sont
+pas prioritaires pour la modularisation. Les helpers source et les scripts de
+build restent la base de distribution actuelle ; les binaires pourront être
+réévalués après le core headless.
