@@ -15,6 +15,7 @@ export type RenderManifest = {
   cache?: { schemaVersion: number; key: string; hit: boolean }; symbols?: SymbolAnchor[]; symbolDiagnostics?: SymbolDiagnostic[]; symbolExtractorVersion?: string;
 };
 export type RenderInput = { path: string; displayPath: string; language: "Rust" | "C" | "Python" | "Text" };
+export type RenderSourceIdentity = { displayPath: string; language: RenderInput["language"]; contentSha256: string; byteLength: number; codec?: string };
 export class RenderCancelled extends Error { constructor() { super("render cancelled"); } }
 export type RenderOptions = {
   beforeRasterize?: (pageCount: number, sourceChars: number) => Promise<boolean>;

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +16,11 @@ import { VISUAL_CONTEXT_HELP } from "../src/help.ts";
 import { registerVisualContextCommand } from "../src/command.ts";
 import { collectGitProvenance } from "../src/git.ts";
 import { renderTask } from "../src/task.ts";
-import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
+import { buildHistoricalSourcePrompt, buildSnapshotTabletIndex, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
 import { extractAllSymbols, mapSymbolsToTablets } from "../src/symbols.ts";
 import { loadProjectContext, reserveTabletIds } from "../src/project.ts";
-import { activeSourceContextFromManifest, buildSymbolNavigationPrompt, buildTabletNavigationPrompt, formatSymbolList, resolveActiveSymbol, resolveNavigation } from "../src/navigation.ts";
+import { activeSourceContextFromManifest, activeSourceContextFromSnapshot, activeSourceContextFromStored, buildSymbolNavigationPrompt, buildTabletNavigationPrompt, formatSymbolList, resolveActiveSymbol, resolveNavigation } from "../src/navigation.ts";
+import { buildSourceContextSnapshot, snapshotIdFor, validateSourceContextSnapshot } from "../src/source-context.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -50,6 +52,103 @@ test("core and direct renderer preserve essential SOURCE data", async () => {
   assert.deepEqual(core.manifest.pageDimensions, direct.manifest.pageDimensions);
   assert.equal(core.tabletIndex, buildSourceTabletIndex(direct.manifest.tablets ?? []));
   rmSync(cache, { recursive: true, force: true });
+});
+
+test("portable snapshot v1 projects Python sources, tablets, symbols, and PNG artifacts", async () => {
+  const cache = mkdtempSync(join(tmpdir(), "pvc-snapshot-"));
+  const result = await prepareSourceContext({ cwd: root, sources: ["tests/fixtures/sample.py"], profile: "normal", cacheDirectory: cache });
+  const sourceBytes = readFileSync(join(root, "tests/fixtures/sample.py"));
+  assert.ok(result);
+  const snapshot = result.snapshot;
+  assert.equal(snapshot.schemaVersion, 1);
+  assert.match(snapshot.snapshotId, /^scs1-[0-9a-f]{64}$/);
+  assert.equal(snapshot.tablets[0].pageIndex, 1);
+  assert.equal(snapshot.sources[0].contentSha256, createHash("sha256").update(sourceBytes).digest("hex"));
+  assert.equal(snapshot.sources[0].symbolExtraction.support, "best-effort");
+  assert.equal(snapshot.sources[0].symbolExtraction.status, "success");
+  assert.ok(snapshot.tablets[0].artifactId);
+  const artifact = snapshot.artifacts.find((item) => item.artifactId === snapshot.tablets[0].artifactId);
+  assert.ok(artifact);
+  assert.equal(artifact.sha256, createHash("sha256").update(result.artifactPayloads[0].data).digest("hex"));
+  const snapshotText = JSON.stringify(snapshot);
+  assert.equal(snapshotText.includes("/home/"), false);
+  assert.equal(snapshotText.includes("/tmp/"), false);
+  assert.equal(snapshotText.match(/[A-Za-z]:[\\\\/]/), null);
+  const { snapshotId, ...identityBase } = snapshot;
+  const withLocatorAndMetrics = structuredClone(identityBase);
+  withLocatorAndMetrics.artifacts[0].relativePath = "artifacts/page.png";
+  withLocatorAndMetrics.artifacts[0].byteLength = 1;
+  withLocatorAndMetrics.metrics.sourceChars += 1;
+  assert.equal(snapshotIdFor(identityBase), snapshotIdFor(withLocatorAndMetrics));
+  const changedIdentity = structuredClone(identityBase);
+  changedIdentity.sources[0].displayPath = "renamed.py";
+  assert.notEqual(snapshotIdFor(identityBase), snapshotIdFor(changedIdentity));
+  validateSourceContextSnapshot(snapshot);
+  validateSourceContextSnapshot(JSON.parse(JSON.stringify(snapshot)));
+  assert.equal(buildSnapshotTabletIndex(snapshot), buildSourceTabletIndex(snapshot.tablets, snapshot.sources));
+  rmSync(cache, { recursive: true, force: true });
+});
+
+test("portable snapshot distinguishes unsupported generic text symbols and validates references", () => {
+  const image = Buffer.from("portable-png-placeholder");
+  const sourceHash = createHash("sha256").update("notes").digest("hex");
+  const manifest = {
+    sourceBytes: 5, sourceChars: 5, encodedChars: 5, removedChars: 0, reductionPercent: 0,
+    pageCount: 1, profile: getVisualProfile("normal"), language: "Text", pageDimensions: [{ width: 1, height: 1 }],
+    finalPage: { originalDimensions: { width: 1, height: 1 }, croppedDimensions: { width: 1, height: 1 }, columnsUsed: 1, croppedRightPixels: 0, croppedBottomPixels: 0 },
+    tablets: [{ id: "VC-VC-000001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, startLine: 1, endLine: 1 }] }], symbols: [], symbolDiagnostics: [], symbolExtractorVersion: "test"
+  };
+  const result = buildSourceContextSnapshot(manifest, [{ input: { path: "/not-read/notes.txt", displayPath: "notes.txt", language: "Text" }, contentSha256: sourceHash, byteLength: 5, codec: "text" }], [image]);
+  assert.equal(result.snapshot.sources[0].symbolExtraction.support, "unsupported");
+  assert.equal(result.snapshot.sources[0].symbolExtraction.status, undefined);
+  for (const displayPath of ["/tmp/foo.py", "C:/work/foo.py", "C:\\work\\foo.py", "\\\\server\\share\\foo.py"]) {
+    assert.throws(() => buildSourceContextSnapshot(manifest, [{ input: { path: "/not-read/source", displayPath, language: "Text" }, contentSha256: sourceHash, byteLength: 5, codec: "text" }], [image]), /displayPath must be relative/);
+  }
+  const failedAndDeduplicated = buildSourceContextSnapshot({
+    ...manifest,
+    language: "Mixed",
+    pageCount: 2,
+    tablets: [
+      { id: "VC-VC-000001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, startLine: 1, endLine: 1 }] },
+      { id: "VC-VC-000002", pageIndex: 2, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 1, startLine: 1, endLine: 1 }] },
+    ],
+    symbols: [{ sourceIndex: 0, name: "ok", qualifiedName: "ok", kind: "function", line: 1, tabletIds: ["VC-VC-000001"] }],
+    symbolDiagnostics: [{ sourceIndex: 1, message: "extractor failed" }],
+  }, [
+    { input: { path: "/not-read/a.py", displayPath: "a.py", language: "Python" }, contentSha256: sourceHash, byteLength: 5, codec: "python" },
+    { input: { path: "/not-read/b.py", displayPath: "b.py", language: "Python" }, contentSha256: sourceHash, byteLength: 5, codec: "python" },
+  ], [image, image]);
+  assert.equal(failedAndDeduplicated.snapshot.sources[0].symbolExtraction.status, "success");
+  assert.equal(failedAndDeduplicated.snapshot.sources[1].symbolExtraction.status, "failed");
+  assert.equal(failedAndDeduplicated.snapshot.symbols.some((symbol) => symbol.sourceIndex === 1), false);
+  assert.equal(failedAndDeduplicated.snapshot.artifacts.length, 1);
+  assert.equal(failedAndDeduplicated.snapshot.tablets[0].artifactId, failedAndDeduplicated.snapshot.tablets[1].artifactId);
+  validateSourceContextSnapshot(failedAndDeduplicated.snapshot);
+  const invalid = structuredClone(result.snapshot);
+  invalid.tablets[0].artifactId = "missing";
+  assert.throws(() => validateSourceContextSnapshot(invalid), /invalid tablet/);
+  const future = structuredClone(result.snapshot);
+  future.schemaVersion = 2;
+  assert.throws(() => validateSourceContextSnapshot(future), /unsupported/);
+});
+
+test("snapshot navigation and legacy v0.4 stored context are filesystem-independent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pvc-navigation-"));
+  const source = join(dir, "sample.py");
+  writeFileSync(source, readFileSync(join(root, "tests/fixtures/sample.py")));
+  const cache = join(dir, "cache");
+  const result = await prepareSourceContext({ cwd: dir, sources: ["sample.py"], profile: "normal", cacheDirectory: cache });
+  assert.ok(result);
+  rmSync(source, { force: true });
+  const context = activeSourceContextFromSnapshot(result.snapshot);
+  assert.match(resolveNavigation(context, { tablet: result.snapshot.tablets[0].id }, "question").text, /source tablet/);
+  assert.match(formatSymbolList(context).text, /compute/);
+  const legacy = activeSourceContextFromStored({ sourceCacheKey: "old-cache", projectPrefix: "VC", tablets: result.snapshot.tablets, tabletIndex: buildSnapshotTabletIndex(result.snapshot), symbols: result.snapshot.symbols });
+  assert.ok(legacy);
+  assert.equal(legacy.sourceCacheKey, "old-cache");
+  assert.match(resolveNavigation(legacy, { symbol: "compute" }, "question").text, /symbol/);
+  assert.match(buildSnapshotTabletIndex(result.snapshot), /sample\.py/);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("builds the compact source tablet index from canonical tablets", () => {

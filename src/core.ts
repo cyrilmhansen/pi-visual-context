@@ -3,6 +3,7 @@ import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { displaySourcePaths, expandSourcePatterns } from "./sources.ts";
 import { renderSources, type RenderInput, type RenderManifest, type RenderOptions } from "./rust.ts";
 import { buildSourceTabletIndex } from "./tablet-index.ts";
+import { buildSourceContextSnapshot, type SourceContextArtifactPayload, type SourceContextSnapshotV1 } from "./source-context.ts";
 
 export type SourceContextOptions = {
   cwd: string;
@@ -23,6 +24,8 @@ export type SourceContext = {
   sourcePaths: string[];
   inputs: RenderInput[];
   tabletIndex: string;
+  snapshot: SourceContextSnapshotV1;
+  artifactPayloads: SourceContextArtifactPayload[];
 };
 
 function languageFor(path: string): RenderInput["language"] {
@@ -50,5 +53,6 @@ export async function prepareSourceContext(options: SourceContextOptions): Promi
     projectRoot: options.cwd,
     readMs: expansionMs,
   });
-  return { ...rendered, sourcePaths, inputs, tabletIndex: buildSourceTabletIndex(rendered.manifest.tablets ?? []) };
+  const portable = buildSourceContextSnapshot(rendered.manifest, rendered.sourceIdentities.map((identity, index) => ({ input: inputs[index], contentSha256: identity.contentSha256, byteLength: identity.byteLength, codec: identity.codec })), rendered.images, rendered.projectPrefix);
+  return { ...rendered, sourcePaths, inputs, tabletIndex: buildSourceTabletIndex(rendered.manifest.tablets ?? []), snapshot: portable.snapshot, artifactPayloads: portable.artifacts };
 }

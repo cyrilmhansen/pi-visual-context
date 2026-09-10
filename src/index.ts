@@ -10,7 +10,7 @@ import { openPreview } from "./preview.ts";
 import { registerVisualContextCommand } from "./command.ts";
 import { renderTask } from "./task.ts";
 import { buildHistoricalSourcePrompt, buildVisualSourcePrompt } from "./tablet-index.ts";
-import { activeSourceContextFromManifest, activeSourceContextFromStored, formatSymbolList, resolveNavigation, type ActiveSourceContext } from "./navigation.ts";
+import { activeSourceContextFromSnapshot, activeSourceContextFromManifest, activeSourceContextFromStored, formatSymbolList, resolveNavigation, type ActiveSourceContext } from "./navigation.ts";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -165,7 +165,7 @@ export default function (pi: ExtensionAPI) {
       }
       active = { manifestPath, manifest: requestManifest };
       if (sourcePaths.length && rendered) {
-        const sourceContext = activeSourceContextFromManifest(rendered.manifest);
+        const sourceContext = activeSourceContextFromSnapshot(rendered.snapshot);
         if (sourceContext) pendingSourceContext = { context: sourceContext, imageHashes: new Set(sourceImages.map((image) => imageHash(image))), attached: false };
       }
       ctx.ui.setStatus("visual-context", undefined);

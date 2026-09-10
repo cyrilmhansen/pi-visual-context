@@ -9,10 +9,10 @@ import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { collectGitProvenance, type GitProvenance } from "./git.ts";
 import { extractAllSymbols, mapSymbolsToTablets, SYMBOL_INDEX_VERSION, type SymbolAnchor, type SymbolDiagnostic, type SymbolInput } from "./symbols.ts";
 import { loadProjectContext, reserveTabletIds } from "./project.ts";
-import type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult } from "./render-types.ts";
+import type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult, RenderSourceIdentity } from "./render-types.ts";
 import { RenderCancelled } from "./render-types.ts";
 export { parseVisualInput } from "./parser.ts";
-export type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult } from "./render-types.ts";
+export type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult, RenderSourceIdentity } from "./render-types.ts";
 export { RenderCancelled } from "./render-types.ts";
 
 const run = promisify(execFile);
@@ -208,20 +208,23 @@ type CacheRecord = {
   pages: { file: string; sha256: string }[];
 };
 
-async function cacheKey(inputs: RenderInput[], profile: VisualProfile, prefix: string): Promise<{ key: string; sourceBytes: number; sourceChars: number }> {
-  const sources = [];
+async function cacheKey(inputs: RenderInput[], profile: VisualProfile, prefix: string): Promise<{ key: string; sourceBytes: number; sourceChars: number; sourceIdentities: RenderSourceIdentity[] }> {
+  const sourceIdentities: RenderSourceIdentity[] = [];
   let sourceBytes = 0;
   let sourceChars = 0;
   for (const input of inputs) {
     const bytes = await readFile(input.path);
+    // This is the portable raw-source identity; it is computed explicitly from bytes, never extracted from the cache key.
+    const contentSha256 = sha256(bytes);
     sourceBytes += bytes.length;
     sourceChars += bytes.toString("utf8").length;
-    sources.push({ displayPath: input.displayPath, language: input.language, codec: input.language === "Text" ? "text" : input.language.toLowerCase(), bytesSha256: sha256(bytes) });
+    sourceIdentities.push({ displayPath: input.displayPath, language: input.language, codec: input.language === "Text" ? "text" : input.language.toLowerCase(), contentSha256, byteLength: bytes.byteLength });
   }
+  const sources = sourceIdentities.map((source) => ({ displayPath: source.displayPath, language: source.language, codec: source.codec, bytesSha256: source.contentSha256 }));
   const template = await readFile(resolve(root, "typst/source.typ"));
   const font = await readFile(resolve(root, "assets/fonts/romulus/Romulus.ttf"));
   const identity = { cacheSchemaVersion: CACHE_SCHEMA_VERSION, pipelineVersion: PIPELINE_VERSION, projectPrefix: prefix, sources, profile, renderer: { typstTemplateSha256: sha256(template), fontSha256: sha256(font), rasterDpi: 1152, outputSize: "1056x960", headerHeight: HEADER_HEIGHT } };
-  return { key: sha256(JSON.stringify(identity)), sourceBytes, sourceChars };
+  return { key: sha256(JSON.stringify(identity)), sourceBytes, sourceChars, sourceIdentities };
 }
 
 async function loadCache(directory: string, key: string, prefix: string): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] } | undefined> {
@@ -434,7 +437,7 @@ async function extractAndMapSymbols(inputs: RenderInput[], tablets: GroupTablet[
   return { ...extracted, symbols: mapSymbolsToTablets(extracted.symbols, tablets) };
 }
 
-export async function renderSources(inputs: RenderInput[], status: (text: string) => void, profile: VisualProfile, options: RenderOptions = {}): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] }> {
+export async function renderSources(inputs: RenderInput[], status: (text: string) => void, profile: VisualProfile, options: RenderOptions = {}): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[]; sourceIdentities: RenderSourceIdentity[]; projectPrefix: string }> {
   const totalStarted = performance.now();
   const readStarted = performance.now();
   const gitState = options.git ? { provenance: options.git, repositoryIds: options.gitRepositoryIds ?? inputs.map(() => null) } : await collectGitProvenance(inputs.map((input) => input.path));
@@ -470,7 +473,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       timings.total = elapsedMs(totalStarted);
       cached.manifest.timingsMs = timings;
       status(`cache hit · ${cached.images.length} tablets`);
-      return cached;
+      return { ...cached, sourceIdentities: identity.sourceIdentities, projectPrefix: projectContext.state.prefix };
     }
   }
   const work = await mkdtemp(resolve(root, ".pi-visual-context-"));
@@ -573,7 +576,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, tablets, symbols: symbolData.symbols, symbolDiagnostics: symbolData.diagnostics, symbolExtractorVersion: symbolData.version, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
     const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, codec: item.value.codec, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
     if (cacheEnabled()) await publishCache(cacheDirectory, key, projectContext.state.prefix, manifest, sourceManifests, images);
-    return { images, manifest, sourceManifests };
+    return { images, manifest, sourceManifests, sourceIdentities: identity.sourceIdentities, projectPrefix: projectContext.state.prefix };
   } finally {
     await rm(work, { recursive: true, force: true });
   }

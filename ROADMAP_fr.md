@@ -18,8 +18,8 @@ headless par Pi et Atlas Agent.
 | **0.4c½ — Identité VC persistante par projet** ✓ | Conserver l’identité entre les rendus | IDs monotones scoped projet, `project.json`, allocation atomique et cache compatible |
 | **0.4d — Navigation sans réinjection** ✓ | Référencer le contexte SOURCE déjà injecté | Un Source Context Set par conversation, `--tablet`/`--symbol`, texte uniquement |
 | **0.4e — Consultation locale de l’index symbolique** ✓ | Inspecter et désambiguïser le snapshot actif | `--symbols`, recherche locale bornée, sans modèle ni rendu |
-| **0.5a — Core boundary** | Séparer le moteur du frontend Pi | Pipeline SOURCE invocable par API TypeScript sans charger Pi |
-| **0.5b — Portable Source Context contract** | Définir un contrat machine versionné | Snapshot compréhensible par un consommateur externe, indépendant de Pi et Typst |
+| **0.5a — Core boundary** ✓ | Séparer le moteur du frontend Pi | Pipeline SOURCE invocable par API TypeScript sans charger Pi |
+| **0.5b — Portable Source Context contract** ✓ | Définir un contrat machine versionné | Snapshot v1 compréhensible par un consommateur externe, indépendant de Pi et Typst |
 | **0.5c — Headless CLI** | Utiliser le cœur sans Pi | CLI JSON déterministe, diagnostics sur stderr, aucun modèle ni état conversationnel |
 | **0.5d — Atlas Agent adapter** | Rendre le service utilisable par Atlas Agent | Atlas Agent récupère snapshots, artefacts et provenance dans son infrastructure qualifiée |
 | **0.5e — Trace / observabilité Atlas Agent** | Rendre l’exécution observable | Event stream exploitable en console, JSONL durable et replay/post-mortem |
@@ -69,10 +69,10 @@ référencées sont encore conservées par le contexte effectif.
 
 ## 0.5 — Modularisation et intégration headless
 
-### 0.5a — Core boundary
+### 0.5a — Core boundary ✓
 
-Le moteur doit être séparé du frontend Pi sans déplacer prématurément les
-responsabilités de session ou d’UX.
+Le core SOURCE est invocable par API TypeScript sans charger Pi. L’adapter Pi
+conserve les responsabilités de session et d’UX.
 
 Architecture cible :
 
@@ -97,27 +97,19 @@ Pi conserve ce qui appartient réellement à Pi : parser et UX `@v`, widgets,
 statuts, confirmations, lifecycle de session, `appendEntry`, `ImageContent` et
 hooks provider.
 
-### 0.5b — Portable Source Context contract
+### 0.5b — Portable Source Context contract ✓
 
-Définir un contrat portable et versionné pour un Source Context Snapshot. Il
-devra pouvoir contenir, selon le besoin réel :
+Le contrat `SourceContextSnapshot v1` est une projection immuable du rendu,
+indépendante de Pi, Typst, du cache et du manifest debug. Il fournit :
 
-```text
-schemaVersion
-sourceCacheKey / identité du snapshot
-projectPrefix
-tablets
-tabletIndex
-symbols
-symbolDiagnostics
-provenance
-metrics
-références d’images et d’artefacts
-```
+- un `snapshotId` distinct de la clé de cache ;
+- une table `sources[]` portable avec hashes du contenu brut ;
+- des références d’artefacts image content-addressed ;
+- une capability symbolique par source ;
+- des tablettes, spans et symboles sans chemins absolus ;
+- une navigation et un `tabletIndex` dérivables du snapshot.
 
-Le manifest historique de debug Pi ne doit pas devenir accidentellement l’API
-publique. Un consommateur externe doit comprendre le snapshot sans connaître
-Pi, Typst ou les détails internes du cache.
+Le manifest historique de debug Pi reste séparé du contrat portable.
 
 ### 0.5c — Headless CLI
 
