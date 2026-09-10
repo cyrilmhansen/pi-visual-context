@@ -9,117 +9,16 @@ import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { collectGitProvenance, type GitProvenance } from "./git.ts";
 import { extractAllSymbols, mapSymbolsToTablets, SYMBOL_INDEX_VERSION, type SymbolAnchor, type SymbolDiagnostic, type SymbolInput } from "./symbols.ts";
 import { loadProjectContext, reserveTabletIds } from "./project.ts";
+import type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult } from "./render-types.ts";
+import { RenderCancelled } from "./render-types.ts";
+export { parseVisualInput } from "./parser.ts";
+export type { RenderManifest, RenderInput, RenderOptions, GroupTablet, ProvenanceSpan, PdfRenderResult } from "./render-types.ts";
+export { RenderCancelled } from "./render-types.ts";
 
 const run = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-export type RenderManifest = {
-  sourceBytes: number;
-  sourceChars: number;
-  encodedChars: number;
-  removedChars: number;
-  reductionPercent: number;
-  pageCount: number;
-  profile: VisualProfile;
-  language: "Rust" | "C" | "Python" | "Text" | "Mixed";
-  codec?: "rust" | "c" | "python" | "text";
-  pageDimensions: { width: number; height: number }[];
-  finalPage: {
-    originalDimensions: { width: number; height: number };
-    croppedDimensions: { width: number; height: number };
-    columnsUsed: number;
-    croppedRightPixels: number;
-    croppedBottomPixels: number;
-  };
-  timingsMs?: Record<string, number>;
-  workers?: number;
-  requestedProfile?: VisualProfile["name"];
-  renderGroups?: {
-    profile: VisualProfile["name"];
-    reason: string;
-    sources: string[];
-    pageCount: number;
-    pageDimensions: { width: number; height: number }[];
-    workers: number;
-    fontsUsed?: string[];
-  }[];
-  tablets?: GroupTablet[];
-  fontsUsed?: string[];
-  git?: GitProvenance;
-  gitRepository?: number | null;
-  cache?: { schemaVersion: number; key: string; hit: boolean };
-  symbols?: SymbolAnchor[];
-  symbolDiagnostics?: SymbolDiagnostic[];
-  symbolExtractorVersion?: string;
-};
 
-export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string; render: boolean; open: boolean; visualPrompt: boolean; tablet?: string; symbol?: string; symbols?: string } {
-  if (!text.startsWith("@v ")) throw new Error("not a visual-context input");
-  const rest = text.slice(3);
-  const spacedSeparator = rest.indexOf(" -- ");
-  const endSeparator = spacedSeparator < 0 && /\s--$/.test(rest.trim()) ? rest.lastIndexOf(" --") : -1;
-  const separator = spacedSeparator >= 0 ? spacedSeparator : endSeparator;
-  const separatorLength = spacedSeparator >= 0 ? 4 : 3;
-  const sourceText = separator < 0 ? rest.trim() : rest.slice(0, separator).trim();
-  const sourceArgs = sourceText.split(/\s+/).filter(Boolean);
-  const question = separator < 0 ? "" : rest.slice(separator + separatorLength).trim();
-  let profile = "normal";
-  let render = false;
-  let open = false;
-  let visualPrompt = false;
-  let tablet: string | undefined;
-  let symbol: string | undefined;
-  let symbols: string | undefined;
-  let profileSpecified = false;
-  const sources: string[] = [];
-  for (let index = 0; index < sourceArgs.length; index++) {
-    const argument = sourceArgs[index];
-    if (argument === "--render") render = true;
-    else if (argument === "--open") open = true;
-    else if (argument === "--visual-prompt") visualPrompt = true;
-    else if (argument === "--profile") {
-      const value = sourceArgs[++index];
-      if (!value || value.startsWith("--")) throw new Error("malformed @v profile syntax; use: --profile <name>");
-      profile = value;
-      profileSpecified = true;
-    } else if (argument === "--tablet") {
-      const value = sourceArgs[++index];
-      if (!value || value.startsWith("--")) throw new Error("malformed @v tablet syntax; use: --tablet <id>");
-      tablet = value;
-    } else if (argument === "--symbol") {
-      const value = sourceArgs[++index];
-      if (!value || value.startsWith("--")) throw new Error("malformed @v symbol syntax; use: --symbol <name>");
-      symbol = value;
-    } else if (argument === "--symbols") {
-      if (symbols !== undefined) throw new Error("malformed @v symbols syntax; use: --symbols [query]");
-      const value = sourceArgs[index + 1];
-      if (value && !value.startsWith("--")) {
-        symbols = value;
-        index++;
-      } else symbols = "";
-    } else sources.push(argument);
-  }
-  if (open) render = true;
-  if (symbols !== undefined) {
-    if (sources.length) throw new Error("--symbols cannot be combined with source paths");
-    if (tablet || symbol) throw new Error("--symbols cannot be combined with navigation targets");
-    if (visualPrompt) throw new Error("--symbols cannot be combined with --visual-prompt");
-    if (render || open) throw new Error("--symbols cannot be combined with --render or --open");
-    if (profileSpecified) throw new Error("--symbols cannot be combined with --profile");
-    if (question) throw new Error("--symbols is a local query and does not accept a question");
-  }
-  if (tablet && symbol) throw new Error("--tablet and --symbol cannot be used together");
-  if (tablet || symbol) {
-    if (sources.length) throw new Error("navigation targets cannot be combined with source paths");
-    if (visualPrompt) throw new Error("navigation cannot be combined with --visual-prompt");
-    if (render || open) throw new Error("navigation cannot be combined with --render or --open");
-    if (profileSpecified) throw new Error("navigation cannot be combined with --profile");
-    if (!question) throw new Error("navigation requires a non-empty question");
-  }
-  if (!sources.length && (!visualPrompt || !question) && !tablet && !symbol && symbols === undefined) throw new Error(visualPrompt ? "visual prompt without sources requires a non-empty prompt" : "malformed @v syntax; source paths and question are required");
-  if (!question && !render && !tablet && !symbol && symbols === undefined) throw new Error("malformed @v syntax; source paths and question are required");
-  return { source: sources[0], sources, question, profile, render, open, visualPrompt, ...(tablet ? { tablet } : {}), ...(symbol ? { symbol } : {}), ...(symbols !== undefined ? { symbols } : {}) };
-}
 
 async function trimGeometry(path: string, crop: string) {
   const { stdout: mean } = await run("magick", [path, "-crop", crop, "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"]);
@@ -235,18 +134,6 @@ async function compactText(sourcePath: string, outDir: string, status: (text: st
 
 export const FILE_BANNER_PREFIX = "__PI_VISUAL_CONTEXT_FILE__:";
 export function formatFileBanner(displayPath: string): string { return `${FILE_BANNER_PREFIX}${displayPath}`; }
-export type RenderInput = { path: string; displayPath: string; language: "Rust" | "C" | "Python" | "Text" };
-export class RenderCancelled extends Error { constructor() { super("render cancelled"); } }
-export type RenderOptions = {
-  beforeRasterize?: (pageCount: number, sourceChars: number) => Promise<boolean>;
-  onCacheHit?: (pageCount: number, sourceChars: number) => Promise<boolean>;
-  cacheDirectory?: string;
-  projectRoot?: string;
-  readMs?: number;
-  git?: GitProvenance;
-  gitRepositoryIds?: (number | null)[];
-};
-
 export function rasterWorkerCount(pageCount: number, env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
   const requested = raw === undefined || raw.trim() === "" ? 4 : Number(raw);
@@ -396,9 +283,7 @@ async function compactFile(input: RenderInput, outDir: string, status: (text: st
   return compactText(input.path, outDir, status);
 }
 
-export type ProvenanceSpan = { sourceIndex: number; sourcePath: string; visualName: string; startLine: number | null; endLine: number | null; bannerOnly?: boolean };
 type ProvenanceMarker = { contentIndex: number; start: number; end: number; startMarker: string; endMarker: string; span: ProvenanceSpan };
-export type GroupTablet = { id?: string; pageIndex: number; profile: VisualProfile["name"]; width: number; height: number; spans: ProvenanceSpan[] };
 
 function sourceLineCount(source: string): number {
   if (source.length === 0) return 0;
@@ -503,12 +388,7 @@ function buildGroupTablets(markers: ProvenanceMarker[], pages: Map<string, numbe
   return tablets;
 }
 
-export type PdfRenderResult = {
-  images: Buffer[];
-  pageDimensions: { width: number; height: number }[];
-  finalPage: { width: number; height: number; columnsUsed: number; croppedRightPixels: number; croppedBottomPixels: number };
-  workers: number;
-};
+
 
 export async function renderPdfPages(
   pdf: string,

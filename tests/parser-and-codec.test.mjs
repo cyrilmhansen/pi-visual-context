@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { classifyRenderedText, cropFinalPage, FILE_BANNER_PREFIX, formatFileBanner, mapPages, parseVisualInput, rasterWorkerCount, RenderCancelled, renderSources } from "../src/rust.ts";
+import { prepareSourceContext } from "../src/core.ts";
 import { buildContinuousRequestManifest, buildRequestManifest, buildVisualPromptRequestManifest } from "../src/manifest.ts";
 import { getVisualProfile } from "../src/profile.ts";
 import { displaySourcePaths, expandSourcePatterns } from "../src/sources.ts";
@@ -23,6 +24,33 @@ const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
 const pythonHelper = join(root, "tools/python-strip-lex/target/release/python-strip-lex");
 const font = join(root, "assets/fonts/romulus/Romulus.ttf");
+
+test("core prepares a source context without loading the Pi extension", async () => {
+  const cache = mkdtempSync(join(tmpdir(), "pvc-core-"));
+  const result = await prepareSourceContext({ cwd: root, sources: ["tests/fixtures/sample.py"], profile: "normal", cacheDirectory: cache });
+  assert.ok(result);
+  assert.equal(result.inputs[0].language, "Python");
+  assert.equal(result.images.length, result.manifest.tablets?.length);
+  assert.ok(result.manifest.tablets?.length);
+  assert.ok(result.manifest.tablets?.every((tablet) => tablet.spans.length > 0));
+  assert.ok(result.tabletIndex.includes("VC-"));
+  assert.ok(result.manifest.symbols?.some((symbol) => symbol.name === "compute"));
+  assert.ok(result.images.every((image) => image.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))));
+  rmSync(cache, { recursive: true, force: true });
+});
+
+test("core and direct renderer preserve essential SOURCE data", async () => {
+  const cache = mkdtempSync(join(tmpdir(), "pvc-parity-"));
+  const core = await prepareSourceContext({ cwd: root, sources: ["tests/fixtures/sample.py"], profile: "normal", cacheDirectory: cache });
+  const direct = await renderSources(core.inputs, () => {}, getVisualProfile("normal"), { cacheDirectory: cache, projectRoot: root });
+  assert.ok(core);
+  assert.deepEqual(core.images, direct.images);
+  assert.deepEqual(core.manifest.tablets, direct.manifest.tablets);
+  assert.deepEqual(core.manifest.symbols, direct.manifest.symbols);
+  assert.deepEqual(core.manifest.pageDimensions, direct.manifest.pageDimensions);
+  assert.equal(core.tabletIndex, buildSourceTabletIndex(direct.manifest.tablets ?? []));
+  rmSync(cache, { recursive: true, force: true });
+});
 
 test("builds the compact source tablet index from canonical tablets", () => {
   const tablets = [

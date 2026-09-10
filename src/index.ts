@@ -2,10 +2,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, extname, resolve } from "node:path";
-import { parseVisualInput, renderSources, RenderCancelled } from "./rust.ts";
-import { getVisualProfile } from "./profile.ts";
+import { parseVisualInput, RenderCancelled } from "./rust.ts";
+import { prepareSourceContext } from "./core.ts";
 import { buildContinuousRequestManifest, buildVisualPromptRequestManifest } from "./manifest.ts";
-import { displaySourcePaths, expandSourcePatterns } from "./sources.ts";
 import { confirmFileBudget, confirmTabletBudget, maxTabletsFromEnvironment } from "./policy.ts";
 import { openPreview } from "./preview.ts";
 import { registerVisualContextCommand } from "./command.ts";
@@ -106,32 +105,31 @@ export default function (pi: ExtensionAPI) {
         return { action: "transform", text: navigation.text! };
       }
       if ((activeSourceContext || pendingSourceContext) && sources.length && !preview) throw new Error("this conversation already has a source context; reference its VC tablets/symbols or start a new conversation");
-      const profile = getVisualProfile(profileName);
-      const readStarted = performance.now();
-      const sourcePaths = sources.length ? await expandSourcePatterns(sources, ctx.cwd) : [];
-      const expansionMs = Math.round((performance.now() - readStarted) * 100) / 100;
-      if (!await confirmFileBudget(ctx.ui, sourcePaths.length)) {
+      let taskResult;
+      const taskOnlyConfirm = async (pageCount: number, chars: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, 0, pageCount, chars, maxTabletsFromEnvironment(), mode);
+      const confirmTotal = async (sourceTablets: number, sourceChars: number, sourceCount: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, sourceCount, (taskResult?.images.length ?? 0) + sourceTablets, sourceChars, maxTabletsFromEnvironment(), mode);
+      const renderTaskForSource = async () => {
+        taskResult = visualPrompt ? await renderTask(question, (text) => status(`task ${text}`), sources.length ? {} : {
+          beforeRasterize: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
+          onCacheHit: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
+        }) : undefined;
+      };
+      const rendered = sources.length ? await prepareSourceContext({
+        cwd: ctx.cwd,
+        sources,
+        profile: profileName,
+        onProgress: status,
+        confirmSources: (count) => confirmFileBudget(ctx.ui, count),
+        afterSourcesExpanded: renderTaskForSource,
+        beforeRasterize: async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, sources.length, preview ? "preview" : "normal") : confirmTabletBudget(ctx.ui, sources.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
+        onCacheHit: preview ? (visualPrompt ? async (tabletCount, sourceChars) => confirmTotal(tabletCount, sourceChars, sources.length, "preview") : undefined) : async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, sources.length, "normal") : confirmTabletBudget(ctx.ui, sources.length, tabletCount, sourceChars, maxTabletsFromEnvironment()),
+      }) : undefined;
+      if (sources.length && !rendered) {
         ctx.ui.setStatus("visual-context", undefined);
         return { action: "handled" };
       }
-      const displayPaths = displaySourcePaths(sourcePaths, ctx.cwd);
-      const renderInputs = sourcePaths.map((sourcePath, index) => {
-        const extension = extname(sourcePath).toLowerCase();
-        const language = extension === ".rs" ? "Rust" as const : extension === ".py" ? "Python" as const : [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp"].includes(extension) ? "C" as const : "Text" as const;
-        return { path: sourcePath, displayPath: displayPaths[index], language };
-      });
-      const taskOnlyConfirm = async (pageCount: number, chars: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, 0, pageCount, chars, maxTabletsFromEnvironment(), mode);
-      const taskResult = visualPrompt ? await renderTask(question, (text) => status(`task ${text}`), sourcePaths.length ? {} : {
-        beforeRasterize: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
-        onCacheHit: async (pageCount, chars) => taskOnlyConfirm(pageCount, chars, preview ? "preview" : "normal"),
-      }) : undefined;
-      const confirmTotal = async (sourceTablets: number, sourceChars: number, mode: "normal" | "preview") => confirmTabletBudget(ctx.ui, sourcePaths.length, (taskResult?.images.length ?? 0) + sourceTablets, sourceChars, maxTabletsFromEnvironment(), mode);
-      const rendered = sourcePaths.length ? await renderSources(renderInputs, status, profile, {
-        readMs: expansionMs,
-        beforeRasterize: async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, preview ? "preview" : "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
-        onCacheHit: preview ? (visualPrompt ? async (tabletCount, sourceChars) => confirmTotal(tabletCount, sourceChars, "preview") : undefined) : async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment()),
-        projectRoot: ctx.cwd,
-      }) : undefined;
+      if (!sources.length) await renderTaskForSource();
+      const sourcePaths = rendered?.sourcePaths ?? [];
       const taskImages = taskResult?.images ?? [];
       const sourceImages = rendered?.images ?? [];
       const images = [...taskImages, ...sourceImages];
