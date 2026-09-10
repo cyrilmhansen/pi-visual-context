@@ -20,7 +20,13 @@ Profiles:
   normal | conservative
 
 Languages: .rs .c .h .py (other files: generic UTF-8 text fallback)
-Options: --visual-prompt  --render  --open  --profile conservative
+Navigation in the current source context:
+  @v --tablet PREFIX-VC-000123 -- question
+  @v --symbol Executor.run -- question
+  Navigation references tablets already attached; it does not resend images.
+  One source context is allowed per conversation.
+
+Options: --visual-prompt  --render  --open  --profile conservative  --tablet  --symbol
 
 Environment:
   PI_VISUAL_CONTEXT_CONFIRM_FILES

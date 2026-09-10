@@ -9,6 +9,7 @@
 | **0.3 — Cache, Unicode, raster parallèle et prompt visuel** | Éviter les recalculs, accélérer le rendu et structurer la tâche visuelle | Cache source/task indépendant, prompt visuel TASK-only ou TASK+SOURCE, fallback texte UTF-8 générique, timings muraux, groupes Romulus/fallback, métadonnées `fontsUsed`, aide `/visual-context`, rasterisation et post-traitement par page | Fichier inchangé → aucun nouveau rendu ; PNG identiques avec 1 ou plusieurs workers ; fallback système best-effort documenté |
 | **0.4a — Tablettes SOURCE adressables** ✓ | Relier chaque tablette aux lignes originales | IDs VC, provenance par tablette/source, plages 1-based inclusives, provenance conservée sur cache HIT | Chaque tablette SOURCE est identifiable avec ses fichiers et lignes ; TASK ne renumérote pas SOURCE |
 | **0.4c½ — Identité VC persistante par projet** ✓ | Conserver l’identité des tablettes entre les rendus | IDs projet-scoped monotones, état `.pi/visual-context/project.json`, allocation sous lock, cache HIT/MISS et invalidation compatibles | Un rendu identique conserve ses IDs ; un snapshot modifié reçoit une nouvelle série sans collision |
+| **0.4d — Navigation sans réinjection** ✓ | Référencer le Source Context Set déjà injecté | `--tablet`/`--symbol`, résolution locale stricte, état scoped à la session Pi, payload texte sans image | Une seule SOURCE par conversation ; navigation sans rendu, cache PNG ni nouvelle ImageContent |
 | **0.4b — Index texte minimal** ✓ | Rendre les tablettes SOURCE nommables dans le contexte texte | Projection compacte de `source.tablets`, noms visuels, lignes originales, index TASK+SOURCE sans duplication du prompt | Le texte contient exactement l’index VC correspondant aux images SOURCE |
 | **0.4c — Symbol anchors ↔ VC** ✓ | Relier les définitions navigables aux lignes originales et aux tablettes | Extraction conservative Python/Rust/C, `source.symbols[]`, mapping exclusif via `source.tablets[]`, aucun enrichissement du payload texte | Le manifest répond à « où est ce symbole ? » sans nouvelle pagination ni navigation interactive |
 | **0.5 — Codec visuel v1** | Formaliser ce qui est encodé | Représentation auto-descriptive, métadonnées dans l’image, symboles LF/TAB, profils, version du codec | Format reproductible et versionné |
@@ -142,9 +143,9 @@ C’est là qu’on étudiera proprement le cache de conversation de Pi.
 
 ## 0.4 — Navigation visuelle
 
-Le support multifichier de base est terminé : plusieurs fichiers `.rs`, `.c` et `.h` peuvent être rendus indépendamment dans un seul message, dans l’ordre fourni.
+Le support multifichier de base est terminé : plusieurs fichiers `.rs`, `.c` et `.h` peuvent être rendus indépendamment dans un seul message, dans l’ordre fourni. Le Source Context Set est maintenant injecté une seule fois par conversation ; `--tablet` et `--symbol` produisent uniquement des références textuelles locales. La compaction Pi peut toutefois retirer les images anciennes du contexte, cas que 0.4d ne répare pas.
 
-La navigation par index reste à construire. L’interface naturelle pourrait évoluer vers :
+L’interface naturelle pour une injection initiale reste :
 
 ```text
 @v src/foo.rs src/bar.rs -- question

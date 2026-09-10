@@ -2,15 +2,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { basename, extname, resolve } from "node:path";
-import { parseVisualInput, renderSources, RenderCancelled } from "./rust";
-import { getVisualProfile } from "./profile";
-import { buildContinuousRequestManifest, buildVisualPromptRequestManifest } from "./manifest";
-import { displaySourcePaths, expandSourcePatterns } from "./sources";
-import { confirmFileBudget, confirmTabletBudget, maxTabletsFromEnvironment } from "./policy";
-import { openPreview } from "./preview";
-import { registerVisualContextCommand } from "./command";
+import { parseVisualInput, renderSources, RenderCancelled } from "./rust.ts";
+import { getVisualProfile } from "./profile.ts";
+import { buildContinuousRequestManifest, buildVisualPromptRequestManifest } from "./manifest.ts";
+import { displaySourcePaths, expandSourcePatterns } from "./sources.ts";
+import { confirmFileBudget, confirmTabletBudget, maxTabletsFromEnvironment } from "./policy.ts";
+import { openPreview } from "./preview.ts";
+import { registerVisualContextCommand } from "./command.ts";
 import { renderTask } from "./task.ts";
 import { buildHistoricalSourcePrompt, buildVisualSourcePrompt } from "./tablet-index.ts";
+import { activeSourceContextFromManifest, activeSourceContextFromStored, resolveNavigation, type ActiveSourceContext } from "./navigation.ts";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -37,17 +38,60 @@ function setGeneratedImageDetail(value: unknown, hashes: Set<string>): boolean {
 
 export default function (pi: ExtensionAPI) {
   let active: { manifestPath: string; manifest: Record<string, unknown> } | undefined;
+  let activeSourceContext: ActiveSourceContext | undefined;
+  let pendingSourceContext: { context: ActiveSourceContext; imageHashes: Set<string>; attached: boolean } | undefined;
   const usage = { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 };
   const generatedImageHashes = new Set<string>();
 
   registerVisualContextCommand(pi);
+
+  pi.on("session_start", async (_event, ctx) => {
+    activeSourceContext = undefined;
+    pendingSourceContext = undefined;
+    for (const entry of ctx.sessionManager.getBranch().reverse()) {
+      if (entry.type === "custom" && entry.customType === "visual-context-source-context") {
+        activeSourceContext = activeSourceContextFromStored(entry.data);
+      }
+    }
+  });
+
+  // message_start only means that Pi is beginning to process the prompt. The
+  // provider request has not necessarily been sent yet, so do not establish
+  // the immutable context here. Keep the candidate pending until Pi confirms
+  // that a provider response was received.
+  pi.on("message_start", (event) => {
+    if (event.message.role !== "user" || !pendingSourceContext || !Array.isArray(event.message.content)) return;
+    const attached = event.message.content.some((item: any) => item?.type === "image" && typeof item.data === "string" && pendingSourceContext!.imageHashes.has(imageHash(item.data)));
+    if (!attached) return;
+    pendingSourceContext.attached = true;
+  });
+
+  pi.on("after_provider_response", (event) => {
+    if (!pendingSourceContext?.attached || event.status < 200 || event.status >= 300) return;
+    activeSourceContext = pendingSourceContext.context;
+    pi.appendEntry("visual-context-source-context", activeSourceContext);
+    pendingSourceContext = undefined;
+  });
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension" || !event.text.startsWith("@v ")) return { action: "continue" };
     ctx.ui.setWidget("visual-context-help", undefined);
     const status = (text: string) => ctx.ui.setStatus("visual-context", `visual-context: ${text}`);
     try {
-      const { sources, question, profile: profileName, render: preview, open, visualPrompt } = parseVisualInput(event.text);
+      const parsed = parseVisualInput(event.text);
+      const { sources, question, profile: profileName, render: preview, open, visualPrompt, tablet, symbol } = parsed;
+      if (tablet || symbol) {
+        const navigation = resolveNavigation(activeSourceContext, { tablet, symbol }, question);
+        if (navigation.error) {
+          ctx.ui.notify(`@v navigation failed: ${navigation.error}`, "error");
+          ctx.ui.setStatus("visual-context", undefined);
+          return { action: "handled" };
+        }
+        status(`resolving ${tablet ?? `symbol ${symbol}`}`);
+        ctx.ui.setStatus("visual-context", undefined);
+        return { action: "transform", text: navigation.text! };
+      }
+      if (activeSourceContext && sources.length && !preview) throw new Error("this conversation already has a source context; reference its VC tablets/symbols or start a new conversation");
       const profile = getVisualProfile(profileName);
       const readStarted = performance.now();
       const sourcePaths = sources.length ? await expandSourcePatterns(sources, ctx.cwd) : [];
@@ -108,6 +152,10 @@ export default function (pi: ExtensionAPI) {
         return { action: "handled" };
       }
       active = { manifestPath, manifest: requestManifest };
+      if (sourcePaths.length && rendered) {
+        const sourceContext = activeSourceContextFromManifest(rendered.manifest);
+        if (sourceContext) pendingSourceContext = { context: sourceContext, imageHashes: new Set(sourceImages.map((image) => imageHash(image))), attached: false };
+      }
       ctx.ui.setStatus("visual-context", undefined);
       const sourceTablets = rendered?.manifest.tablets ?? [];
       return {

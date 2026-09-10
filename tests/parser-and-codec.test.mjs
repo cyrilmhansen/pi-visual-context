@@ -17,6 +17,7 @@ import { renderTask } from "../src/task.ts";
 import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
 import { extractAllSymbols, mapSymbolsToTablets } from "../src/symbols.ts";
 import { loadProjectContext, reserveTabletIds } from "../src/project.ts";
+import { activeSourceContextFromManifest, buildSymbolNavigationPrompt, buildTabletNavigationPrompt, resolveActiveSymbol, resolveNavigation } from "../src/navigation.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -41,6 +42,48 @@ test("builds the compact source tablet index from canonical tablets", () => {
   assert.equal(buildHistoricalSourcePrompt("original  question", tablets), `Use the attached visual source context to answer the question.\n\nSource tablet index:\n${index}\n\noriginal  question`);
   assert.equal(buildVisualSourcePrompt(tablets), `Use the attached visual task and source context to answer.\n\nSource tablet index:\n${index}`);
   assert.equal(buildVisualSourcePrompt([]), "Use the attached visual task and source context to answer.");
+});
+
+test("parses explicit tablet and symbol navigation without source paths", () => {
+  assert.deepEqual(parseVisualInput("@v --tablet AA-VC-000123 -- Why?"), {
+    source: undefined, sources: [], question: "Why?", profile: "normal", render: false, open: false, visualPrompt: false, tablet: "AA-VC-000123",
+  });
+  assert.deepEqual(parseVisualInput("@v --symbol Executor.run -- Explain."), {
+    source: undefined, sources: [], question: "Explain.", profile: "normal", render: false, open: false, visualPrompt: false, symbol: "Executor.run",
+  });
+  assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 foo.py -- question"), /source paths/);
+  assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 --symbol Foo -- question"), /cannot be used together/);
+  assert.throws(() => parseVisualInput("@v --symbol Foo --render -- question"), /--render/);
+  assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 --"), /non-empty question/);
+});
+
+test("resolves navigation only against an immutable active source context", () => {
+  const manifest = {
+    cache: { key: "snapshot-a" },
+    tablets: [
+      { id: "AA-VC-000123", pageIndex: 0, profile: "normal", width: 1056, height: 500, spans: [{ sourceIndex: 0, sourcePath: "/tmp/executor.py", visualName: "executor.py", startLine: 1, endLine: 20 }] },
+      { id: "AA-VC-000124", pageIndex: 1, profile: "normal", width: 1056, height: 500, spans: [{ sourceIndex: 0, sourcePath: "/tmp/executor.py", visualName: "executor.py", startLine: 20, endLine: 40 }] },
+    ],
+    symbols: [
+      { sourceIndex: 0, name: "run", qualifiedName: "Executor.run", kind: "method", line: 20, tabletIds: ["AA-VC-000123", "AA-VC-000124"] },
+      { sourceIndex: 0, name: "init", qualifiedName: "Executor.init", kind: "method", line: 5, tabletIds: ["AA-VC-000123"] },
+      { sourceIndex: 0, name: "init", qualifiedName: "Other.init", kind: "method", line: 30, tabletIds: ["AA-VC-000124"] },
+    ],
+  };
+  const context = activeSourceContextFromManifest(manifest);
+  assert.ok(context);
+  assert.equal(context.sourceCacheKey, "snapshot-a");
+  manifest.tablets[0].spans[0].startLine = 999;
+  manifest.symbols[0].line = 999;
+  assert.match(resolveNavigation(context, { tablet: "AA-VC-000123" }, "Why?").text, /AA-VC-000123 executor\.py:1-20/);
+  assert.match(resolveNavigation(context, { symbol: "Executor.run" }, "Explain.").text, /Declaration: executor\.py:20/);
+  assert.match(resolveNavigation(context, { symbol: "init" }, "Explain.").error, /ambiguous/);
+  assert.match(resolveNavigation(context, { tablet: "AA-VC-000999" }, "Why?").error, /not active/);
+  assert.match(resolveNavigation(undefined, { tablet: "AA-VC-000123" }, "Why?").error, /no active source context/);
+  assert.equal(resolveActiveSymbol(context, "missing").resolved, undefined);
+  assert.equal(resolveActiveSymbol(context, "missing").error.includes("not found"), true);
+  assert.match(buildTabletNavigationPrompt(context.tablets[0], "Why?"), /Why\?$/);
+  assert.match(buildSymbolNavigationPrompt(resolveActiveSymbol(context, "Executor.run").resolved, "Explain."), /Source tablets: AA-VC-000123, AA-VC-000124/);
 });
 
 test("extracts conservative navigation symbols without confusing comments or strings", async () => {
@@ -109,6 +152,137 @@ test("project VC allocation is persistent, monotone, atomic, and cache-safe", as
   await loadProjectContext({ projectRoot, cacheDirectory: cache });
   assert.equal(existsSync(join(cache, "old-cache")), false);
   assert.equal(existsSync(join(cache, "task", "kept.txt")), true);
+});
+
+test("extension navigation returns text only and blocks a second source context before rendering", async () => {
+  const handlers = new Map();
+  const pi = {
+    on(name, handler) { handlers.set(name, handler); },
+    registerCommand() {},
+    appendEntry() { throw new Error("navigation should not append state"); },
+  };
+  const extension = (await import("../src/index.ts")).default;
+  extension(pi);
+  const tablets = [{ id: "AA-VC-000123", pageIndex: 0, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/a.py", visualName: "a.py", startLine: 1, endLine: 4 }] }];
+  const symbols = [{ sourceIndex: 0, name: "run", qualifiedName: "Executor.run", kind: "method", line: 2, tabletIds: ["AA-VC-000123"] }];
+  await handlers.get("session_start")({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: "visual-context-source-context", data: { sourceCacheKey: "a", projectPrefix: "AA", tablets, tabletIndex: "AA-VC-000123 a.py:1-4", symbols } }] } });
+  const statuses = [];
+  const notifications = [];
+  const ctx = { cwd: "/tmp", ui: { setWidget() {}, setStatus(_name, text) { statuses.push(text); }, notify(text) { notifications.push(text); } } };
+  const tablet = await handlers.get("input")({ source: "interactive", text: "@v --tablet AA-VC-000123 -- Why?" }, ctx);
+  assert.equal(tablet.action, "transform");
+  assert.equal(tablet.images, undefined);
+  assert.match(tablet.text, /AA-VC-000123 a\.py:1-4/);
+  const symbol = await handlers.get("input")({ source: "interactive", text: "@v --symbol Executor.run -- Explain." }, ctx);
+  assert.equal(symbol.action, "transform");
+  assert.equal(symbol.images, undefined);
+  assert.match(symbol.text, /Source tablets: AA-VC-000123/);
+  const second = await handlers.get("input")({ source: "interactive", text: "@v other.py -- question" }, ctx);
+  assert.equal(second.action, "handled");
+  assert.match(notifications.at(-1), /already has a source context/);
+  assert.equal(statuses.includes("laying out"), false);
+});
+
+test("keeps two extension session contexts isolated and handles local navigation errors", async () => {
+  const extension = (await import("../src/index.ts")).default;
+  const makeSession = (id, symbolName) => {
+    const handlers = new Map();
+    const pi = { on(name, handler) { handlers.set(name, handler); }, registerCommand() {}, appendEntry() {} };
+    extension(pi);
+    const tablets = [{ id, pageIndex: 0, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: `/${id}.py`, visualName: `${id}.py`, startLine: 1, endLine: 4 }] }];
+    const symbols = [{ sourceIndex: 0, name: symbolName, qualifiedName: `Owner.${symbolName}`, kind: "method", line: 2, tabletIds: [id] }];
+    return { handlers, data: { tablets, tabletIndex: `${id} ${id}.py:1-4`, symbols } };
+  };
+  const a = makeSession("AA-VC-000001", "run");
+  const b = makeSession("BB-VC-000001", "start");
+  await a.handlers.get("session_start")({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: "visual-context-source-context", data: a.data }] } });
+  await b.handlers.get("session_start")({}, { sessionManager: { getBranch: () => [] } });
+  const errors = [];
+  const ctx = { cwd: "/tmp", ui: { setWidget() {}, setStatus() {}, notify(text) { errors.push(text); } } };
+  const aTablet = await a.handlers.get("input")({ source: "interactive", text: "@v --tablet AA-VC-000001 -- A" }, ctx);
+  assert.equal(aTablet.action, "transform");
+  const bForeign = await b.handlers.get("input")({ source: "interactive", text: "@v --tablet AA-VC-000001 -- B" }, ctx);
+  assert.equal(bForeign.action, "handled");
+  assert.match(errors.at(-1), /no active source context/);
+  const bSource = await b.handlers.get("session_start")({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: "visual-context-source-context", data: b.data }] } });
+  assert.equal(bSource, undefined);
+  const bTablet = await b.handlers.get("input")({ source: "interactive", text: "@v --tablet BB-VC-000001 -- B" }, ctx);
+  assert.equal(bTablet.action, "transform");
+  const absent = await a.handlers.get("input")({ source: "interactive", text: "@v --symbol Missing -- A" }, ctx);
+  assert.equal(absent.action, "handled");
+  const ambiguousData = { ...a.data, symbols: [...a.data.symbols, { ...a.data.symbols[0], qualifiedName: "Other.run" }] };
+  await a.handlers.get("session_start")({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: "visual-context-source-context", data: ambiguousData }] } });
+  const ambiguous = await a.handlers.get("input")({ source: "interactive", text: "@v --symbol run -- A" }, ctx);
+  assert.equal(ambiguous.action, "handled");
+  assert.match(errors.at(-1), /ambiguous/);
+  assert.equal(aTablet.images, undefined);
+  assert.equal(bTablet.images, undefined);
+});
+
+test("establishes SOURCE only after a successful provider response", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-source-lifecycle-test-"));
+  const source = join(dir, "sample.py");
+  writeFileSync(source, "def run():\n    return 1\n");
+  const handlers = new Map();
+  const appended = [];
+  const pi = {
+    on(name, handler) { handlers.set(name, handler); },
+    registerCommand() {},
+    appendEntry(type, data) { appended.push({ type, data }); },
+  };
+  const extension = (await import("../src/index.ts")).default;
+  extension(pi);
+  await handlers.get("session_start")({}, { sessionManager: { getBranch: () => [] } });
+  const errors = [];
+  const statuses = [];
+  const ctx = { cwd: dir, ui: { setWidget() {}, setStatus(_name, text) { statuses.push(text); }, notify(text) { errors.push(text); } } };
+  const initial = await handlers.get("input")({ source: "interactive", text: `@v ${source} -- Explain.` }, ctx);
+  assert.equal(initial.action, "transform", errors.join("\n"));
+  assert.ok(initial.images.length > 0);
+
+  await handlers.get("message_start")({ message: { role: "user", content: initial.images } }, ctx);
+  assert.equal(appended.length, 0);
+  await handlers.get("after_provider_response")({ status: 503 }, ctx);
+  assert.equal(appended.length, 0);
+  const rejected = await handlers.get("input")({ source: "interactive", text: "@v --tablet XX-VC-000001 -- Why?" }, ctx);
+  assert.equal(rejected.action, "handled");
+
+  const replacement = join(dir, "replacement.py");
+  writeFileSync(replacement, "def run():\n    return 2\n");
+  const secondSource = await handlers.get("input")({ source: "interactive", text: `@v ${replacement} -- Explain.` }, ctx);
+  assert.equal(secondSource.action, "transform");
+  await handlers.get("message_start")({ message: { role: "user", content: secondSource.images } }, ctx);
+  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].type, "visual-context-source-context");
+  const tabletId = appended[0].data.tablets[0].id;
+  rmSync(source);
+  rmSync(replacement);
+  rmSync(join(dir, ".pi", "visual-context", "cache"), { recursive: true, force: true });
+  const navigation = await handlers.get("input")({ source: "interactive", text: `@v --tablet ${tabletId} -- Why?` }, ctx);
+  assert.equal(navigation.action, "transform");
+  assert.equal(navigation.images, undefined);
+  assert.ok(!navigation.images || navigation.images.filter((item) => item.type === "image").length === 0);
+
+  const symbol = await handlers.get("input")({ source: "interactive", text: "@v --symbol run -- Explain." }, ctx);
+  assert.equal(symbol.action, "transform");
+  assert.equal(symbol.images, undefined);
+  await handlers.get("message_start")({ message: { role: "user", content: [{ type: "text", text: symbol.text }] } }, ctx);
+  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  assert.equal(appended.length, 1);
+
+  const task = await handlers.get("input")({ source: "interactive", text: "@v --visual-prompt -- Summarize." }, ctx);
+  assert.equal(task.action, "transform");
+  assert.ok(task.images.length > 0);
+  await handlers.get("message_start")({ message: { role: "user", content: task.images } }, ctx);
+  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  assert.equal(appended.length, 1);
+
+  const statusCount = statuses.length;
+  const second = await handlers.get("input")({ source: "interactive", text: "@v does-not-exist.py -- second source" }, ctx);
+  assert.equal(second.action, "handled");
+  assert.match(errors.at(-1), /already has a source context/);
+  assert.equal(statuses.slice(statusCount).some((status) => /reading|laying out|rasterizing|encoding/i.test(status ?? "")), false);
 });
 
 test("registers a local /visual-context help command without model work", async () => {
