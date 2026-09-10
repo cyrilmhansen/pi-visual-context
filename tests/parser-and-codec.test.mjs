@@ -219,7 +219,7 @@ test("keeps two extension session contexts isolated and handles local navigation
   assert.equal(bTablet.images, undefined);
 });
 
-test("establishes SOURCE only after a successful provider response", async () => {
+test("establishes SOURCE only after a successful assistant message", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-visual-source-lifecycle-test-"));
   const source = join(dir, "sample.py");
   writeFileSync(source, "def run():\n    return 1\n");
@@ -241,18 +241,24 @@ test("establishes SOURCE only after a successful provider response", async () =>
   assert.ok(initial.images.length > 0);
 
   await handlers.get("message_start")({ message: { role: "user", content: initial.images } }, ctx);
-  assert.equal(appended.length, 0);
-  await handlers.get("after_provider_response")({ status: 503 }, ctx);
+  await handlers.get("message_end")({ message: { role: "user", content: initial.images } }, ctx);
   assert.equal(appended.length, 0);
   const rejected = await handlers.get("input")({ source: "interactive", text: "@v --tablet XX-VC-000001 -- Why?" }, ctx);
   assert.equal(rejected.action, "handled");
+  const failedSecondSource = await handlers.get("input")({ source: "interactive", text: `@v ${source} -- retry` }, ctx);
+  assert.equal(failedSecondSource.action, "handled");
+  await handlers.get("agent_end")({ messages: [] }, ctx);
+  const afterCleanup = await handlers.get("input")({ source: "interactive", text: "@v --tablet XX-VC-000001 -- still absent" }, ctx);
+  assert.equal(afterCleanup.action, "handled");
 
   const replacement = join(dir, "replacement.py");
   writeFileSync(replacement, "def run():\n    return 2\n");
   const secondSource = await handlers.get("input")({ source: "interactive", text: `@v ${replacement} -- Explain.` }, ctx);
   assert.equal(secondSource.action, "transform");
   await handlers.get("message_start")({ message: { role: "user", content: secondSource.images } }, ctx);
-  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  await handlers.get("message_end")({ message: { role: "user", content: secondSource.images } }, ctx);
+  await handlers.get("message_start")({ message: { role: "assistant", content: [], stopReason: "stop" } }, ctx);
+  await handlers.get("message_end")({ message: { role: "assistant", content: [], stopReason: "stop" } }, ctx);
   assert.equal(appended.length, 1);
   assert.equal(appended[0].type, "visual-context-source-context");
   const tabletId = appended[0].data.tablets[0].id;
@@ -268,14 +274,14 @@ test("establishes SOURCE only after a successful provider response", async () =>
   assert.equal(symbol.action, "transform");
   assert.equal(symbol.images, undefined);
   await handlers.get("message_start")({ message: { role: "user", content: [{ type: "text", text: symbol.text }] } }, ctx);
-  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  await handlers.get("message_end")({ message: { role: "user", content: [{ type: "text", text: symbol.text }] } }, ctx);
   assert.equal(appended.length, 1);
 
   const task = await handlers.get("input")({ source: "interactive", text: "@v --visual-prompt -- Summarize." }, ctx);
   assert.equal(task.action, "transform");
   assert.ok(task.images.length > 0);
   await handlers.get("message_start")({ message: { role: "user", content: task.images } }, ctx);
-  await handlers.get("after_provider_response")({ status: 200 }, ctx);
+  await handlers.get("message_end")({ message: { role: "user", content: task.images } }, ctx);
   assert.equal(appended.length, 1);
 
   const statusCount = statuses.length;

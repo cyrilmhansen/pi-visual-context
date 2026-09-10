@@ -42,6 +42,17 @@ export default function (pi: ExtensionAPI) {
   let pendingSourceContext: { context: ActiveSourceContext; imageHashes: Set<string>; attached: boolean } | undefined;
   const usage = { modelCallCount: 0, assistantMessageCount: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalCost: 0 };
   const generatedImageHashes = new Set<string>();
+  const activatePendingSource = () => {
+    const pending = pendingSourceContext;
+    if (!pending?.attached) return;
+    try {
+      pi.appendEntry("visual-context-source-context", pending.context);
+      activeSourceContext = pending.context;
+      pendingSourceContext = undefined;
+    } catch {
+      // Leave the pending context for the agent-end cleanup path.
+    }
+  };
 
   registerVisualContextCommand(pi);
 
@@ -55,10 +66,8 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // message_start only means that Pi is beginning to process the prompt. The
-  // provider request has not necessarily been sent yet, so do not establish
-  // the immutable context here. Keep the candidate pending until Pi confirms
-  // that a provider response was received.
+  // message_start only confirms that SOURCE images entered the user message.
+  // Keep the candidate pending until the assistant turn succeeds.
   pi.on("message_start", (event) => {
     if (event.message.role !== "user" || !pendingSourceContext || !Array.isArray(event.message.content)) return;
     const attached = event.message.content.some((item: any) => item?.type === "image" && typeof item.data === "string" && pendingSourceContext!.imageHashes.has(imageHash(item.data)));
@@ -66,11 +75,9 @@ export default function (pi: ExtensionAPI) {
     pendingSourceContext.attached = true;
   });
 
-  pi.on("after_provider_response", (event) => {
-    if (!pendingSourceContext?.attached || event.status < 200 || event.status >= 300) return;
-    activeSourceContext = pendingSourceContext.context;
-    pi.appendEntry("visual-context-source-context", activeSourceContext);
-    pendingSourceContext = undefined;
+  pi.on("turn_end", (event) => {
+    const message = event.message as any;
+    if (pendingSourceContext && (message?.stopReason === "error" || message?.stopReason === "aborted")) pendingSourceContext = undefined;
   });
 
   pi.on("input", async (event, ctx) => {
@@ -91,7 +98,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("visual-context", undefined);
         return { action: "transform", text: navigation.text! };
       }
-      if (activeSourceContext && sources.length && !preview) throw new Error("this conversation already has a source context; reference its VC tablets/symbols or start a new conversation");
+      if ((activeSourceContext || pendingSourceContext) && sources.length && !preview) throw new Error("this conversation already has a source context; reference its VC tablets/symbols or start a new conversation");
       const profile = getVisualProfile(profileName);
       const readStarted = performance.now();
       const sourcePaths = sources.length ? await expandSourcePatterns(sources, ctx.cwd) : [];
@@ -182,8 +189,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (event) => {
-    if (!active || event.message.role !== "assistant") return;
     const message = event.message as any;
+    const assistantFailure = event.message.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted" || Boolean(message.errorMessage));
+    if (event.message.role === "assistant" && pendingSourceContext?.attached) {
+      if (assistantFailure) pendingSourceContext = undefined;
+      else activatePendingSource();
+    }
+    if (!active || event.message.role !== "assistant") return;
     const u = message.usage ?? {};
     usage.assistantMessageCount++;
     usage.modelCallCount++;
@@ -196,6 +208,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_end", async (_event, ctx) => {
+    if (pendingSourceContext) pendingSourceContext = undefined;
     if (!active) return;
     const manifest = { ...active.manifest, usage: { ...usage } };
     await writeFile(active.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
