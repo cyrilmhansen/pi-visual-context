@@ -25,8 +25,14 @@ export function buildRequestManifest(
   const pages = pageFiles.flat();
   const tablets = rendered.flatMap((item) => item.manifest.tablets ?? []);
   const tabletIndex = buildSourceTabletIndex(tablets);
+  const symbols = [];
+  let sourceOffset = 0;
+  for (const item of rendered) {
+    for (const symbol of item.manifest.symbols ?? []) symbols.push({ ...symbol, sourceIndex: symbol.sourceIndex + sourceOffset });
+    sourceOffset += Math.max(0, ...(item.manifest.tablets ?? []).flatMap((tablet) => tablet.spans.map((span) => span.sourceIndex + 1)), 0);
+  }
   if (rendered.length === 1) return { ...rendered[0].manifest, sourcePath: rendered[0].path, pages, sources, tabletIndex, globalMetrics: metrics, tabletSourcesKnown: true, usage };
-  return { profile, sources, pages, pageCount: pages.length, pageDimensions, tablets, tabletSources: tablets, tabletSourcesKnown: true, tabletIndex, globalMetrics: metrics, usage };
+  return { profile, sources, pages, pageCount: pages.length, pageDimensions, tablets, symbols, tabletSources: tablets, tabletSourcesKnown: true, tabletIndex, globalMetrics: metrics, usage };
 }
 
 export function buildVisualPromptRequestManifest(

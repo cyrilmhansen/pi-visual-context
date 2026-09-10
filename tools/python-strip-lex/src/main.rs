@@ -1,5 +1,6 @@
 use std::{env, fs};
-use rustpython_parser::{lexer, Mode, Tok};
+use rustpython_parser::{ast, lexer, Mode, Parse, Tok};
+use rustpython_parser::ast::Ranged;
 
 fn enc_token(s: &str) -> String {
     s.chars().map(|c| match c {
@@ -25,8 +26,74 @@ fn can_join(a: &Tok, a_text: &str, b: &Tok, b_text: &str) -> bool {
     tokens.len() == 2 && tokens[0] == *a && tokens[1] == *b
 }
 
+#[derive(Clone)]
+struct SymbolRecord { name: String, qualified_name: String, kind: &'static str, line: usize }
+
+fn source_line(source: &str, offset: usize) -> usize {
+    let mut line = 1;
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < offset && index < bytes.len() {
+        if bytes[index] == b'\n' { line += 1; }
+        else if bytes[index] == b'\r' && (index + 1 >= bytes.len() || bytes[index + 1] != b'\n') { line += 1; }
+        index += 1;
+    }
+    line
+}
+
+fn json_string(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n").replace('\r', "\\r"))
+}
+
+fn collect_symbols(body: &[ast::Stmt], source: &str, scope: &[(String, bool)], output: &mut Vec<SymbolRecord>) {
+    for statement in body {
+        match statement {
+            ast::Stmt::ClassDef(node) => {
+                let name = node.name.to_string();
+                let qualified_name = scope.iter().map(|item| item.0.as_str()).chain(std::iter::once(name.as_str())).collect::<Vec<_>>().join(".");
+                output.push(SymbolRecord { name: name.clone(), qualified_name, kind: "type", line: source_line(source, node.range().start().to_usize()) });
+                let mut next = scope.to_vec();
+                next.push((name, true));
+                collect_symbols(&node.body, source, &next, output);
+            }
+            ast::Stmt::FunctionDef(node) => {
+                let name = node.name.to_string();
+                let qualified_name = scope.iter().map(|item| item.0.as_str()).chain(std::iter::once(name.as_str())).collect::<Vec<_>>().join(".");
+                let kind = if scope.last().is_some_and(|item| item.1) { "method" } else { "function" };
+                output.push(SymbolRecord { name: name.clone(), qualified_name, kind, line: source_line(source, node.range().start().to_usize()) });
+                let mut next = scope.to_vec();
+                next.push((name, false));
+                collect_symbols(&node.body, source, &next, output);
+            }
+            ast::Stmt::AsyncFunctionDef(node) => {
+                let name = node.name.to_string();
+                let qualified_name = scope.iter().map(|item| item.0.as_str()).chain(std::iter::once(name.as_str())).collect::<Vec<_>>().join(".");
+                let kind = if scope.last().is_some_and(|item| item.1) { "method" } else { "function" };
+                output.push(SymbolRecord { name: name.clone(), qualified_name, kind, line: source_line(source, node.range().start().to_usize()) });
+                let mut next = scope.to_vec();
+                next.push((name, false));
+                collect_symbols(&node.body, source, &next, output);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn emit_symbols(source: &str) {
+    let Ok(ast) = ast::Suite::parse(source, "<symbols>") else { println!("[]"); return; };
+    let mut records = Vec::new();
+    collect_symbols(&ast, source, &[], &mut records);
+    let json = records.into_iter().map(|record| format!("{{\"name\":{},\"qualifiedName\":{},\"kind\":{},\"line\":{}}}", json_string(&record.name), json_string(&record.qualified_name), json_string(record.kind), record.line)).collect::<Vec<_>>().join(",");
+    println!("[{json}]");
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() == 3 && args[1] == "--symbols-json" {
+        let source = fs::read_to_string(&args[2]).unwrap_or_default();
+        emit_symbols(&source);
+        return;
+    }
     if args.len() != 4 { eprintln!("usage: python-strip-lex <source.py> <output.txt> <font.ttf>"); std::process::exit(2); }
     let source = fs::read_to_string(&args[1]).expect("read source");
     lex_tokens(&source).unwrap_or_else(|e| { eprintln!("Python lexical error: {e}"); std::process::exit(1); });

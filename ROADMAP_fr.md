@@ -9,6 +9,7 @@
 | **0.3 — Cache, Unicode, raster parallèle et prompt visuel** | Éviter les recalculs, accélérer le rendu et structurer la tâche visuelle | Cache source/task indépendant, prompt visuel TASK-only ou TASK+SOURCE, fallback texte UTF-8 générique, timings muraux, groupes Romulus/fallback, métadonnées `fontsUsed`, aide `/visual-context`, rasterisation et post-traitement par page | Fichier inchangé → aucun nouveau rendu ; PNG identiques avec 1 ou plusieurs workers ; fallback système best-effort documenté |
 | **0.4a — Tablettes SOURCE adressables** ✓ | Relier chaque tablette aux lignes originales | IDs `VC-xxx`, provenance par tablette/source, plages 1-based inclusives, provenance conservée sur cache HIT | Chaque tablette SOURCE est identifiable avec ses fichiers et lignes ; TASK ne renumérote pas SOURCE |
 | **0.4b — Index texte minimal** ✓ | Rendre les tablettes SOURCE nommables dans le contexte texte | Projection compacte de `source.tablets`, noms visuels, lignes originales, index TASK+SOURCE sans duplication du prompt | Le texte contient exactement l’index VC correspondant aux images SOURCE |
+| **0.4c — Symbol anchors ↔ VC** ✓ | Relier les définitions navigables aux lignes originales et aux tablettes | Extraction conservative Python/Rust/C, `source.symbols[]`, mapping exclusif via `source.tablets[]`, aucun enrichissement du payload texte | Le manifest répond à « où est ce symbole ? » sans nouvelle pagination ni navigation interactive |
 | **0.5 — Codec visuel v1** | Formaliser ce qui est encodé | Représentation auto-descriptive, métadonnées dans l’image, symboles LF/TAB, profils, version du codec | Format reproductible et versionné |
 | **0.6 — Coûts et cache provider** | Réduire les coûts au-delà du rendu local | Prompt cache, métriques de tokens d’entrée, optimisations provider | Mesures reproductibles sans changer les pixels |
 | **0.7 — Expérimentations de programmation visuelle** | Exploiter réellement le canal graphique | Couleurs catégorielles, boîtes, relations, références spatiales, graphes, annotations | Gains au-delà du simple texte rasterisé |
@@ -20,7 +21,7 @@
 
 Le prototype autonome 0.1 est maintenant implémenté et validé sans appel LLM : build Rust, profils, rendu, crop, en-têtes, artefacts de debug, usage et packaging sont en place.
 
-Le support multifichier de base, les codecs Rust/C et la commande Pi `/visual-context` d’aide/découverte sont également implémentés. Le cache déterministe, l’instrumentation temporelle et le raster/post-traitement parallèle par page constituent le scope 0.3 ; la navigation par symboles et l’indexation restent futures.
+Le support multifichier de base, les codecs Rust/C et la commande Pi `/visual-context` d’aide/découverte sont également implémentés. Le cache déterministe, l’instrumentation temporelle et le raster/post-traitement parallèle par page constituent le scope 0.3 ; les tablettes adressables, l’index texte minimal et les symbol anchors conservateurs sont désormais validés en 0.4a–0.4c. La navigation interactive reste future.
 
 ## 0.1 — Terminé
 

@@ -7,6 +7,7 @@ import { availableParallelism } from "node:os";
 import { createHash } from "node:crypto";
 import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { collectGitProvenance, type GitProvenance } from "./git.ts";
+import { extractAllSymbols, mapSymbolsToTablets, SYMBOL_INDEX_VERSION, type SymbolAnchor, type SymbolDiagnostic, type SymbolInput } from "./symbols.ts";
 
 const run = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,6 +47,9 @@ export type RenderManifest = {
   git?: GitProvenance;
   gitRepository?: number | null;
   cache?: { schemaVersion: number; key: string; hit: boolean };
+  symbols?: SymbolAnchor[];
+  symbolDiagnostics?: SymbolDiagnostic[];
+  symbolExtractorVersion?: string;
 };
 
 export function parseVisualInput(text: string): { source: string; sources: string[]; question: string; profile: string; render: boolean; open: boolean; visualPrompt: boolean } {
@@ -507,6 +511,11 @@ export async function renderPdfPages(
   return { images: pageResults.map((page) => page.image), pageDimensions: pageResults.map((page) => page.dimensions), finalPage: pageResults[pageResults.length - 1].finalPage, workers: groupWorkers };
 }
 
+async function extractAndMapSymbols(inputs: RenderInput[], tablets: GroupTablet[]): Promise<{ symbols: SymbolAnchor[]; diagnostics: SymbolDiagnostic[]; version: string }> {
+  const extracted = await extractAllSymbols(inputs as SymbolInput[]);
+  return { ...extracted, symbols: mapSymbolsToTablets(extracted.symbols, tablets) };
+}
+
 export async function renderSources(inputs: RenderInput[], status: (text: string) => void, profile: VisualProfile, options: RenderOptions = {}): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] }> {
   const totalStarted = performance.now();
   const readStarted = performance.now();
@@ -529,6 +538,16 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       cached.manifest.git = gitState.provenance;
       cached.sourceManifests = cached.sourceManifests.map((item, index) => ({ ...item, path: inputs[index]?.path ?? item.path, manifest: { ...item.manifest, gitRepository: gitState.repositoryIds[index] ?? null } }));
       cached.manifest.tablets = cached.manifest.tablets?.map((tablet) => ({ ...tablet, spans: tablet.spans.map((span) => ({ ...span, sourcePath: inputs[span.sourceIndex]?.path ?? span.sourcePath, visualName: inputs[span.sourceIndex]?.displayPath ?? span.visualName })) }));
+      if (cached.manifest.symbolExtractorVersion !== SYMBOL_INDEX_VERSION || !Array.isArray(cached.manifest.symbols)) {
+        const symbolStarted = performance.now();
+        const symbolData = await extractAndMapSymbols(inputs, cached.manifest.tablets ?? []);
+        cached.manifest.symbols = symbolData.symbols;
+        cached.manifest.symbolDiagnostics = symbolData.diagnostics;
+        cached.manifest.symbolExtractorVersion = symbolData.version;
+        timings.symbols = elapsedMs(symbolStarted);
+      }
+      timings.total = elapsedMs(totalStarted);
+      cached.manifest.timingsMs = timings;
       status(`cache hit · ${cached.images.length} tablets`);
       return cached;
     }
@@ -624,7 +643,11 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers, fontsUsed: group.fontsUsed }));
     const tablets = prepared.flatMap((group, index) => buildGroupTablets(group.markers, group.provenancePages, group.pageCount, group.group.profile.name, renderedGroups[index].pageDimensions)).map((tablet, index) => ({ ...tablet, id: `VC-${String(index + 1).padStart(3, "0")}`, pageIndex: index + 1 }));
     const fontsUsed = [...new Set(prepared.flatMap((group) => group.fontsUsed))].sort();
-    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, tablets, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
+    const symbolStarted = performance.now();
+    const symbolData = await extractAndMapSymbols(inputs, tablets);
+    timings.symbols = elapsedMs(symbolStarted);
+    timings.total = elapsedMs(totalStarted);
+    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, tablets, symbols: symbolData.symbols, symbolDiagnostics: symbolData.diagnostics, symbolExtractorVersion: symbolData.version, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
     const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, codec: item.value.codec, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
     if (cacheEnabled()) await publishCache(cacheDirectory, key, manifest, sourceManifests, images);
     return { images, manifest, sourceManifests };

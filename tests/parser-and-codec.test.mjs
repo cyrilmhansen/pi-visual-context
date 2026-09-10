@@ -15,6 +15,7 @@ import { registerVisualContextCommand } from "../src/command.ts";
 import { collectGitProvenance } from "../src/git.ts";
 import { renderTask } from "../src/task.ts";
 import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
+import { extractAllSymbols, mapSymbolsToTablets } from "../src/symbols.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -39,6 +40,51 @@ test("builds the compact source tablet index from canonical tablets", () => {
   assert.equal(buildHistoricalSourcePrompt("original  question", tablets), `Use the attached visual source context to answer the question.\n\nSource tablet index:\n${index}\n\noriginal  question`);
   assert.equal(buildVisualSourcePrompt(tablets), `Use the attached visual task and source context to answer.\n\nSource tablet index:\n${index}`);
   assert.equal(buildVisualSourcePrompt([]), "Use the attached visual task and source context to answer.");
+});
+
+test("extracts conservative navigation symbols without confusing comments or strings", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-symbols-test-"));
+  const python = join(dir, "symbols.py");
+  const rust = join(dir, "symbols.rs");
+  const c = join(dir, "symbols.c");
+  const text = join(dir, "notes.txt");
+  writeFileSync(python, "@decorator\nclass Foo:\n    def bar(self):\n        def inner():\n            pass\n        return inner\n\nasync def top():\n    pass\n# def fake():\nvalue = 'class Fake:'\ndef café():\n    pass\n".replaceAll("\n", "\r\n"));
+  writeFileSync(rust, "struct Foo {}\nimpl Foo {\n    fn run(&self) {}\n}\n// fn fake() {}\n/* outer /* fn hidden() {} */ still hidden */\nconst VALUE: i32 = 1;\nmacro_rules! make_it { () => {} }\nmod nested {}\n");
+  writeFileSync(c, "#define MAX 4\nstruct Foo { int x; };\ntypedef int Alias;\nint run(int x) { return x; }\n// int fake(void) { return 0; }\nconst char *s = \\\"int fake() { }\\\";\nint (*fp)(int);\n");
+  writeFileSync(text, "# def fake():\nclass Fake\n");
+  const extracted = await extractAllSymbols([
+    { path: python, displayPath: "symbols.py", language: "Python" },
+    { path: rust, displayPath: "symbols.rs", language: "Rust" },
+    { path: c, displayPath: "symbols.c", language: "C" },
+    { path: text, displayPath: "notes.txt", language: "Text" },
+  ]);
+  assert.deepEqual(extracted.diagnostics, []);
+  assert.deepEqual(extracted.symbols.filter((symbol) => symbol.sourceIndex === 0).map(({ name, qualifiedName, kind, line }) => ({ name, qualifiedName, kind, line })), [
+    { name: "Foo", qualifiedName: "Foo", kind: "type", line: 2 },
+    { name: "bar", qualifiedName: "Foo.bar", kind: "method", line: 3 },
+    { name: "inner", qualifiedName: "Foo.bar.inner", kind: "function", line: 4 },
+    { name: "top", qualifiedName: "top", kind: "function", line: 8 },
+    { name: "café", qualifiedName: "café", kind: "function", line: 12 },
+  ]);
+  assert.deepEqual(extracted.symbols.filter((symbol) => symbol.sourceIndex === 1).map((symbol) => symbol.name), ["Foo", "run", "VALUE", "make_it", "nested"]);
+  assert.deepEqual(extracted.symbols.filter((symbol) => symbol.sourceIndex === 2).map((symbol) => symbol.name), ["MAX", "Foo", "Alias", "run"]);
+  assert.deepEqual(extracted.symbols.filter((symbol) => symbol.sourceIndex === 3), []);
+  const mapped = mapSymbolsToTablets([{ sourceIndex: 0, name: "wrapped", qualifiedName: "wrapped", kind: "function", line: 184 }], [
+    { id: "VC-003", spans: [{ sourceIndex: 0, startLine: 1, endLine: 184 }] },
+    { id: "VC-004", spans: [{ sourceIndex: 0, startLine: 184, endLine: 250 }] },
+  ]);
+  assert.deepEqual(mapped[0].tabletIds, ["VC-003", "VC-004"]);
+  assert.deepEqual(mapSymbolsToTablets([{ sourceIndex: 1, name: "empty", qualifiedName: "empty", kind: "function", line: 1 }], [{ id: "VC-005", spans: [{ sourceIndex: 1, startLine: null, endLine: null, bannerOnly: true }] }])[0].tabletIds, []);
+});
+
+test("symbol extraction failure is non-fatal for visual rendering", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-symbols-invalid-test-"));
+  const source = join(dir, "broken.py");
+  writeFileSync(source, "if True\n");
+  const rendered = await renderSources([{ path: source, displayPath: "broken.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache") });
+  assert.ok(rendered.images.length >= 1);
+  assert.deepEqual(rendered.manifest.symbols, []);
+  assert.ok(Array.isArray(rendered.manifest.symbolDiagnostics));
 });
 
 test("registers a local /visual-context help command without model work", async () => {
@@ -246,6 +292,7 @@ test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specia
   assert.ok(rendered.sourceManifests.every((item) => item.manifest.codec === "text"));
   assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "normal"));
   assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "conservative"));
+  assert.deepEqual(rendered.manifest.symbols, []);
   assert.ok(rendered.manifest.tablets.some((tablet) => new Set(tablet.spans.map((span) => span.sourceIndex)).size >= 2));
   const specialized = await renderSources([{ path: join(root, "tests/fixtures/sample.py"), displayPath: "sample.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "specialized-cache") });
   assert.equal(specialized.sourceManifests[0].manifest.codec, "python");
@@ -392,6 +439,9 @@ test("continuous renderer combines files and reports global progress", async () 
   const mixedSpans = rendered.manifest.tablets.flatMap((tablet) => tablet.spans);
   assert.ok(mixedSpans.some((span) => span.sourceIndex === 0 && span.startLine === 1 && span.endLine === 2));
   assert.ok(mixedSpans.some((span) => span.sourceIndex === 1 && span.startLine === 1 && span.endLine === 1));
+  assert.deepEqual(rendered.manifest.symbols.map((symbol) => [symbol.name, symbol.sourceIndex, symbol.line]), [["first", 0, 1], ["second", 1, 1]]);
+  const requestManifest = buildContinuousRequestManifest(rendered.sourceManifests, ["page-001.png"], rendered.manifest, {});
+  assert.deepEqual(requestManifest.symbols, rendered.manifest.symbols);
   assert.ok(statuses.some((status) => status.startsWith("laying out 2 files")));
   assert.ok(statuses.some((status) => status.startsWith("rasterizing 1/")));
   const preview = await renderSources([
@@ -475,6 +525,7 @@ test("final PNG cache hits without invoking layout or rasterization", async () =
   const second = await renderSources(input, (status) => secondStatuses.push(status), getVisualProfile("normal"), { cacheDirectory: cache });
   assert.equal(second.manifest.cache.hit, true);
   assert.deepEqual(second.images, first.images);
+  assert.deepEqual(second.manifest.symbols, first.manifest.symbols);
   assert.ok(secondStatuses.includes(`cache hit · ${first.images.length} tablets`));
   assert.equal(secondStatuses.some((status) => status.startsWith("laying out")), false);
   assert.equal(secondStatuses.some((status) => status.startsWith("rasterizing")), false);
@@ -631,8 +682,9 @@ test("visual task manifest keeps task pages before source pages and supports TAS
   assert.equal(manifest.source, null);
   assert.equal(manifest.totalTablets, result.manifest.pageCount);
   assert.equal(manifest.pageCount, result.manifest.pageCount);
-  const sourceManifest = buildVisualPromptRequestManifest(result.manifest, ["task-001.png"], { tablets: [{ id: "VC-001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/a.py", visualName: "a.py", startLine: 1, endLine: 2 }] }] }, [], ["source-001.png"], {});
+  const sourceManifest = buildVisualPromptRequestManifest(result.manifest, ["task-001.png"], { tablets: [{ id: "VC-001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/a.py", visualName: "a.py", startLine: 1, endLine: 2 }] }], symbols: [{ sourceIndex: 0, name: "a", qualifiedName: "a", kind: "function", line: 1, tabletIds: ["VC-001"] }] }, [], ["source-001.png"], {});
   assert.equal(sourceManifest.source.tabletIndex, "VC-001 a.py:1-2");
+  assert.equal(sourceManifest.source.symbols[0].qualifiedName, "a");
 });
 
 test("raster worker policy is bounded and page mapping preserves order", async () => {
