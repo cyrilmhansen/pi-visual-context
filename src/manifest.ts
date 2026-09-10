@@ -22,8 +22,8 @@ export function buildRequestManifest(
   const metrics = globalMetrics(rendered);
   const pageDimensions = rendered.flatMap((item) => item.manifest.pageDimensions);
   const pages = pageFiles.flat();
-  if (rendered.length === 1) return { ...rendered[0].manifest, sourcePath: rendered[0].path, pages, sources, globalMetrics: metrics, usage };
-  return { profile, sources, pages, pageCount: pages.length, pageDimensions, globalMetrics: metrics, usage };
+  if (rendered.length === 1) return { ...rendered[0].manifest, sourcePath: rendered[0].path, pages, sources, globalMetrics: metrics, tabletSourcesKnown: true, usage };
+  return { profile, sources, pages, pageCount: pages.length, pageDimensions, tablets: rendered.flatMap((item) => item.manifest.tablets ?? []), tabletSources: rendered.flatMap((item) => item.manifest.tablets ?? []), tabletSourcesKnown: true, globalMetrics: metrics, usage };
 }
 
 export function buildVisualPromptRequestManifest(
@@ -58,8 +58,9 @@ export function buildContinuousRequestManifest(
     pages: pageFiles,
     pageCount: pageFiles.length,
     globalMetrics: globalMetrics(sourceManifests),
-    tabletSources: null,
-    tabletSourcesKnown: false,
+    tablets: manifest.tablets ?? [],
+    tabletSources: manifest.tablets ?? [],
+    tabletSourcesKnown: true,
     usage,
   };
 }

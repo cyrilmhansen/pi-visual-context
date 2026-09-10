@@ -6,6 +6,7 @@
 #let side-margin = float(sys.inputs.at("margin", default: "12")) * 1pt
 #let gutter-width = float(sys.inputs.at("gutter", default: "24")) * 1pt
 #let source-file = sys.inputs.at("source")
+#let mapping-file = sys.inputs.at("mapping", default: "")
 #let banner-prefix = "__PI_VISUAL_CONTEXT_FILE__:"
 
 #set page(
@@ -42,8 +43,34 @@
     linebreak()
   }
 }
-#columns(ncols, gutter: gutter-width)[
-  #for content in read(source-file).split("\n") {
+#let render-mapped(content, records) = {
+  let cursor = 0
+  for record in records {
+    let fields = record.split("|")
+    let start = int(fields.at(1))
+    let end = int(fields.at(2))
+    context metadata(fields.at(3) + "|" + str(here().page()))
+    text(content.slice(cursor, start))
+    text(content.slice(start, end))
+    context metadata(fields.at(4) + "|" + str(here().page()))
+    cursor = end
+  }
+  if cursor < content.len() { text(content.slice(cursor, content.len())) }
+  linebreak()
+}
+#let render-mapped-line(content, records) = {
+  if content.starts-with(banner-prefix) {
+    context metadata(records.at(0).split("|").at(3) + "|" + str(here().page()))
     render-line(content)
+    context metadata(records.at(0).split("|").at(4) + "|" + str(here().page()))
+  } else {
+    render-mapped(content, records)
+  }
+}
+#let mapping-records = if mapping-file == "" { () } else { read(mapping-file).split("\n").filter(record => record != "") }
+#columns(ncols, gutter: gutter-width)[
+  #for (index, content) in read(source-file).split("\n").enumerate() {
+    let records = mapping-records.filter(record => int(record.split("|").at(0)) == index)
+    if records.len() == 0 { render-line(content) } else { render-mapped-line(content, records) }
   }
 ]

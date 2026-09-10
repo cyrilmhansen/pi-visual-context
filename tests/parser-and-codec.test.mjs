@@ -178,7 +178,8 @@ test("builds unambiguous mono and multi-file manifest page ownership", () => {
     { path: "foo.py", manifest: fakeManifest(10, [], "Python") },
     { path: "bar.rs", manifest: fakeManifest(20, [], "Rust") },
   ], ["page-001.png"], fakeManifest(30, [{ width: 1056, height: 960 }], "Mixed"), {});
-  assert.equal(continuous.tabletSourcesKnown, false);
+  assert.equal(continuous.tabletSourcesKnown, true);
+  assert.deepEqual(continuous.tablets, []);
   assert.equal(continuous.sources[0].pages, undefined);
 });
 
@@ -224,6 +225,7 @@ test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specia
   assert.ok(rendered.sourceManifests.every((item) => item.manifest.codec === "text"));
   assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "normal"));
   assert.ok(rendered.manifest.renderGroups.some((group) => group.profile === "conservative"));
+  assert.ok(rendered.manifest.tablets.some((tablet) => new Set(tablet.spans.map((span) => span.sourceIndex)).size >= 2));
   const specialized = await renderSources([{ path: join(root, "tests/fixtures/sample.py"), displayPath: "sample.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "specialized-cache") });
   assert.equal(specialized.sourceManifests[0].manifest.codec, "python");
   const lf = join(dir, "lf.txt");
@@ -239,6 +241,15 @@ test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specia
   const invalid = join(dir, "invalid.bin");
   writeFileSync(invalid, Buffer.from([0xc3, 0x28]));
   await assert.rejects(() => renderSources([{ path: invalid, displayPath: "invalid.bin", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "invalid-cache") }), /requires UTF-8/);
+  const longLine = join(dir, "long-line.txt");
+  writeFileSync(longLine, `${"long-content ".repeat(4000)}\n`);
+  const longRender = await renderSources([{ path: longLine, displayPath: "long-line.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "long-line-cache") });
+  assert.ok(longRender.manifest.pageCount > 1);
+  assert.ok(longRender.manifest.tablets.every((tablet) => tablet.spans.some((span) => span.startLine === 1 && span.endLine === 1)));
+  const empty = join(dir, "empty.txt");
+  writeFileSync(empty, "");
+  const emptyRender = await renderSources([{ path: empty, displayPath: "empty.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "empty-cache") });
+  assert.ok(emptyRender.manifest.tablets.some((tablet) => tablet.spans.some((span) => span.bannerOnly && span.startLine === null && span.endLine === null)));
 });
 
 test("C codec handles the bundled header/source fixture", () => {
@@ -357,6 +368,9 @@ test("continuous renderer combines files and reports global progress", async () 
   assert.equal(rendered.manifest.language, "Mixed");
   assert.equal(rendered.sourceManifests.length, 2);
   assert.equal(rendered.manifest.pageCount, rendered.images.length);
+  const mixedSpans = rendered.manifest.tablets.flatMap((tablet) => tablet.spans);
+  assert.ok(mixedSpans.some((span) => span.sourceIndex === 0 && span.startLine === 1 && span.endLine === 2));
+  assert.ok(mixedSpans.some((span) => span.sourceIndex === 1 && span.startLine === 1 && span.endLine === 1));
   assert.ok(statuses.some((status) => status.startsWith("laying out 2 files")));
   assert.ok(statuses.some((status) => status.startsWith("rasterizing 1/")));
   const preview = await renderSources([
@@ -389,6 +403,14 @@ test("mixed Unicode sources render normal before conservative groups", async () 
   assert.equal(first.manifest.renderGroups[1].pageCount >= 1, true);
   assert.equal(first.manifest.renderGroups[0].profile, "normal");
   assert.equal(first.manifest.renderGroups[1].profile, "conservative");
+  assert.equal(first.manifest.tablets.length, first.manifest.pageCount);
+  assert.deepEqual(first.manifest.tablets.map((tablet) => tablet.id), first.manifest.tablets.map((_, index) => `VC-${String(index + 1).padStart(3, "0")}`));
+  assert.ok(first.manifest.tablets.every((tablet) => tablet.spans.every((span) => span.startLine === null || (span.startLine >= 1 && span.endLine >= span.startLine))));
+  assert.ok(first.manifest.tablets.some((tablet) => tablet.spans.some((span) => span.sourceIndex === 0)));
+  assert.ok(first.manifest.tablets.some((tablet) => tablet.spans.some((span) => span.sourceIndex === 2)));
+  const normalTabletCount = first.manifest.renderGroups[0].pageCount;
+  assert.ok(first.manifest.tablets.slice(0, normalTabletCount).every((tablet) => tablet.profile === "normal"));
+  assert.ok(first.manifest.tablets.slice(normalTabletCount).every((tablet) => tablet.profile === "conservative"));
   assert.ok(first.manifest.renderGroups.every((group) => Array.isArray(group.fontsUsed)));
   assert.ok(first.manifest.renderGroups.every((group) => group.fontsUsed.includes("Romulus")));
   assert.deepEqual(first.manifest.fontsUsed, [...new Set(first.manifest.fontsUsed)].sort((a, b) => a.localeCompare(b)));
@@ -403,6 +425,7 @@ test("mixed Unicode sources render normal before conservative groups", async () 
   assert.equal(second.manifest.cache.hit, true);
   assert.deepEqual(second.manifest.fontsUsed, first.manifest.fontsUsed);
   assert.deepEqual(second.manifest.renderGroups.map((group) => group.fontsUsed), first.manifest.renderGroups.map((group) => group.fontsUsed));
+  assert.deepEqual(second.manifest.tablets, first.manifest.tablets);
   assert.deepEqual(second.images, first.images);
   const conservative = await renderSources(inputs, () => {}, getVisualProfile("conservative"), { cacheDirectory: join(dir, "conservative-cache") });
   assert.equal(conservative.manifest.renderGroups.length, 1);
@@ -603,6 +626,24 @@ test("raster worker policy is bounded and page mapping preserves order", async (
   assert.deepEqual(pages, ["page-1", "page-2", "page-3", "page-4"]);
   assert.deepEqual(progress, [1, 2, 3, 4]);
   await assert.rejects(() => mapPages(4, 4, async (page) => { if (page === 2) throw new Error("page failed"); return page; }), /page failed/);
+});
+
+test("source provenance is deterministic across raster worker counts", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-provenance-workers-test-"));
+  const source = join(dir, "source.py");
+  writeFileSync(source, Array.from({ length: 80 }, (_, index) => `value_${index} = ${index}`).join("\n") + "\n");
+  const previous = process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+  try {
+    process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "1";
+    const one = await renderSources([{ path: source, displayPath: "source.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "one") });
+    process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "4";
+    const four = await renderSources([{ path: source, displayPath: "source.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "four") });
+    assert.deepEqual(four.images, one.images);
+    assert.deepEqual(four.manifest.tablets, one.manifest.tablets);
+  } finally {
+    if (previous === undefined) delete process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+    else process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = previous;
+  }
 });
 
 test("C codec is deterministic on a focused fixture", () => {

@@ -41,6 +41,7 @@ export type RenderManifest = {
     workers: number;
     fontsUsed?: string[];
   }[];
+  tablets?: GroupTablet[];
   fontsUsed?: string[];
   git?: GitProvenance;
   gitRepository?: number | null;
@@ -124,8 +125,8 @@ async function compactC(sourcePath: string, outDir: string, status: (text: strin
   return { output, sourceBytes: Buffer.byteLength(source), sourceChars: source.length, encodedChars, removedChars, reductionPercent, codec: "c" };
 }
 
-async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Text" | "Mixed", headerPrefix?: string) {
-  const text = headerPrefix ? `${headerPrefix} | ${page}/${total}` : `${language} | visual-context | ${page}/${total} | ${profile.name}`;
+async function addHeader(path: string, page: number, total: number, profile: VisualProfile, language: "Rust" | "C" | "Python" | "Text" | "Mixed", headerPrefix?: string | ((page: number, total: number, globalPage: number) => string), globalPage = page) {
+  const text = typeof headerPrefix === "function" ? headerPrefix(page, total, globalPage) : headerPrefix ? `${headerPrefix} | ${page}/${total}` : `${language} | visual-context | ${page}/${total} | ${profile.name}`;
   const font = resolve(root, "assets/fonts/romulus/Romulus.ttf");
   const output = `${path}.header.png`;
   await run("magick", [path, "-gravity", "NorthWest", "-background", "white", "-splice", `0x${HEADER_HEIGHT}`, "-font", font, "-fill", "black", "-pointsize", "10", "-annotate", "+12+4", text, output]);
@@ -265,8 +266,8 @@ async function loadRomulusCodepoints(): Promise<Set<number>> {
   return parseFontCharset(stdout);
 }
 
-const CACHE_SCHEMA_VERSION = 2;
-const PIPELINE_VERSION = "0.3.0-unicode-groups-1";
+const CACHE_SCHEMA_VERSION = 3;
+const PIPELINE_VERSION = "0.4.0-source-tablets-1";
 const cacheEnabled = () => !["0", "false", "no", "off"].includes((process.env.PI_VISUAL_CONTEXT_CACHE ?? "1").toLowerCase());
 const sha256 = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const elapsedMs = (started: number) => Math.round((performance.now() - started) * 100) / 100;
@@ -353,6 +354,113 @@ async function compactFile(input: RenderInput, outDir: string, status: (text: st
   return compactText(input.path, outDir, status);
 }
 
+type ProvenanceSpan = { sourceIndex: number; sourcePath: string; visualName: string; startLine: number | null; endLine: number | null; bannerOnly?: boolean };
+type ProvenanceMarker = { contentIndex: number; start: number; end: number; startMarker: string; endMarker: string; span: ProvenanceSpan };
+type GroupTablet = { id?: string; pageIndex: number; profile: VisualProfile["name"]; width: number; height: number; spans: ProvenanceSpan[] };
+
+function sourceLineCount(source: string): number {
+  if (source.length === 0) return 0;
+  const normalized = source.replace(/\r\n?/g, "\n");
+  return normalized.endsWith("\n") ? normalized.split("\n").length - 1 : normalized.split("\n").length;
+}
+
+function structuralSegments(content: string): { start: number; end: number }[] {
+  const segments: { start: number; end: number }[] = [];
+  let previousVisible = "";
+  let byteOffset = 0;
+  let segmentStartByte = 0;
+  for (const character of content) {
+    const characterBytes = Buffer.byteLength(character);
+    if (character !== "\u200b") {
+      if (character === "¶" && previousVisible !== "¤") {
+        segments.push({ start: segmentStartByte, end: byteOffset + characterBytes });
+        segmentStartByte = byteOffset + characterBytes;
+      }
+      previousVisible = character;
+    }
+    byteOffset += characterBytes;
+  }
+  if (segmentStartByte < byteOffset) segments.push({ start: segmentStartByte, end: byteOffset });
+  return segments;
+}
+
+async function buildProvenanceMapping(input: RenderInput, value: Compacted, sourceIndex: number, contentIndex: number, markerPrefix: string, markers: ProvenanceMarker[], mappingLines: string[], outputChunks: Buffer[]): Promise<number> {
+  const source = await readFile(input.path, "utf8");
+  const normalized = source.replace(/\r\n?/g, "\n");
+  const lineCount = sourceLineCount(source);
+  const banner = formatFileBanner(input.displayPath);
+  const bannerStart = `${markerPrefix}-banner-start`;
+  const bannerEnd = `${markerPrefix}-banner-end`;
+  const bannerSpan: ProvenanceSpan = { sourceIndex, sourcePath: input.path, visualName: input.displayPath, startLine: null, endLine: null, bannerOnly: true };
+  markers.push({ contentIndex, start: 0, end: Buffer.byteLength(banner), startMarker: bannerStart, endMarker: bannerEnd, span: bannerSpan });
+  mappingLines.push(`${contentIndex}|0|${Buffer.byteLength(banner)}|${bannerStart}|${bannerEnd}`);
+  outputChunks.push(Buffer.from(`${banner}\n`));
+  let nextContentIndex = contentIndex + 1;
+  const makeRecord = (start: number, end: number, startLine: number | null, endLine: number | null, suffix: string) => {
+    const span: ProvenanceSpan = { sourceIndex, sourcePath: input.path, visualName: input.displayPath, startLine, endLine };
+    const startMarker = `${markerPrefix}-${suffix}-start`;
+    const endMarker = `${markerPrefix}-${suffix}-end`;
+    markers.push({ contentIndex: nextContentIndex, start, end, startMarker, endMarker, span });
+    return `${nextContentIndex}|${start}|${end}|${startMarker}|${endMarker}`;
+  };
+  if (value.codec === "text") {
+    const lines = normalized.split("\n");
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+      if (lineIndex < lineCount) mappingLines.push(makeRecord(0, Buffer.byteLength(lines[lineIndex]), lineIndex + 1, lineIndex + 1, `line-${lineIndex}`));
+      nextContentIndex++;
+    }
+    outputChunks.push(Buffer.from(normalized, "utf8"), Buffer.from("\n"));
+    return contentIndex + 1 + lines.length;
+  }
+  const content = await readFile(value.output, "utf8");
+  const segments = structuralSegments(content);
+  const lines = normalized.split("\n");
+  let originalLine = 1;
+  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+    if (originalLine > lineCount) break;
+    let endLine = originalLine;
+    if (input.language === "Python") while (endLine < lineCount && /\\\s*$/.test(lines[endLine - 1])) endLine++;
+    mappingLines.push(makeRecord(segments[segmentIndex].start, segments[segmentIndex].end, originalLine, endLine, `segment-${segmentIndex}`));
+    originalLine = endLine + 1;
+  }
+  outputChunks.push(content ? Buffer.from(content) : await readFile(value.output), Buffer.from("\n"));
+  return contentIndex + 2;
+}
+
+async function queryProvenance(typstFile: string, sourceFile: string, mappingFile: string, fontDir: string, profile: VisualProfile): Promise<Map<string, number>> {
+  const args = ["query", typstFile, "metadata", "--root", root, "--font-path", fontDir, "--input", `source=../${sourceFile.slice(root.length + 1)}`, "--input", `mapping=../${mappingFile.slice(root.length + 1)}`,  "--input", `font=${profile.font}`, "--input", `cols=${profile.columns}`, "--input", `scale=${profile.scale}`, "--input", `size=${profile.fontSize}`, "--input", `leading=${profile.leading}`, "--input", `margin=${profile.sideMargin}`, "--input", `gutter=${profile.gutter}`];
+  const { stdout } = await run("typst", args);
+  const values = JSON.parse(stdout) as { value?: string }[];
+  const pages = new Map<string, number>();
+  for (const item of values) {
+    const parts = item.value?.split("|") ?? [];
+    if (parts.length === 2 && Number.isInteger(Number(parts[1]))) pages.set(parts[0], Number(parts[1]));
+  }
+  return pages;
+}
+
+function buildGroupTablets(markers: ProvenanceMarker[], pages: Map<string, number>, pageCount: number, profile: VisualProfile["name"], dimensions: { width: number; height: number }[]): GroupTablet[] {
+  const tablets = Array.from({ length: pageCount }, (_, index) => ({ pageIndex: index + 1, profile, width: dimensions[index]?.width ?? 1056, height: dimensions[index]?.height ?? 980, spans: [] as ProvenanceSpan[] }));
+  for (const marker of markers) {
+    const startPage = pages.get(marker.startMarker);
+    const endPage = pages.get(marker.endMarker);
+    if (!startPage || !endPage) continue;
+    for (let page = Math.max(1, startPage); page <= Math.min(pageCount, endPage); page++) {
+      const tablet = tablets[page - 1];
+      const previous = tablet.spans.at(-1);
+      if (previous && previous.sourceIndex === marker.span.sourceIndex && previous.startLine !== null && marker.span.startLine !== null && previous.endLine !== null && marker.span.endLine !== null && marker.span.startLine <= previous.endLine + 1) {
+        previous.endLine = Math.max(previous.endLine, marker.span.endLine);
+      } else if (!tablet.spans.some((span) => span.sourceIndex === marker.span.sourceIndex && span.bannerOnly === marker.span.bannerOnly)) {
+        tablet.spans.push({ ...marker.span });
+      }
+    }
+  }
+  for (const tablet of tablets) {
+    if (tablet.spans.some((span) => !span.bannerOnly)) tablet.spans = tablet.spans.filter((span) => !span.bannerOnly);
+  }
+  return tablets;
+}
+
 export type PdfRenderResult = {
   images: Buffer[];
   pageDimensions: { width: number; height: number }[];
@@ -369,7 +477,7 @@ export async function renderPdfPages(
   status: (text: string) => void,
   progressStart = 0,
   progressTotal = pageCount,
-  headerPrefix?: string,
+  headerPrefix?: string | ((page: number, total: number, globalPage: number) => string),
 ): Promise<PdfRenderResult> {
   const configuredWorkers = rasterWorkerCount(pageCount);
   let completed = progressStart;
@@ -387,7 +495,7 @@ export async function renderPdfPages(
     await rm(input);
     const { stdout: size } = await run("identify", ["-format", "%wx%h", output]);
     if (size.trim() !== "1056x960") throw new Error(`renderer produced ${size.trim()}, expected 1056x960`);
-    await addHeader(output, pageIndex + 1, pageCount, profile, language, headerPrefix);
+    await addHeader(output, pageIndex + 1, pageCount, profile, language, headerPrefix, progressStart + pageIndex + 1);
     let finalPage = { width: 1056, height: HEADER_HEIGHT + 960, columnsUsed: 3, croppedRightPixels: 0, croppedBottomPixels: 0 };
     if (pageIndex === pageCount - 1) finalPage = await cropFinalPage(output, profile);
     const normalized = `${output}.normalized.png`;
@@ -420,6 +528,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       cached.manifest.cache = { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: true };
       cached.manifest.git = gitState.provenance;
       cached.sourceManifests = cached.sourceManifests.map((item, index) => ({ ...item, path: inputs[index]?.path ?? item.path, manifest: { ...item.manifest, gitRepository: gitState.repositoryIds[index] ?? null } }));
+      cached.manifest.tablets = cached.manifest.tablets?.map((tablet) => ({ ...tablet, spans: tablet.spans.map((span) => ({ ...span, sourcePath: inputs[span.sourceIndex]?.path ?? span.sourcePath, visualName: inputs[span.sourceIndex]?.displayPath ?? span.visualName })) }));
       status(`cache hit · ${cached.images.length} tablets`);
       return cached;
     }
@@ -455,7 +564,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const languages = [...new Set(inputs.map((input) => input.language))];
     const language = languages.length === 1 ? languages[0] : "Mixed";
     const fontDir = resolve(root, "assets/fonts/romulus");
-    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Text" | "Mixed"; fontsUsed: string[] }[];
+    const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Text" | "Mixed"; fontsUsed: string[]; markers: ProvenanceMarker[]; provenancePages: Map<string, number> }[];
     let typstMs = 0;
     let pdfinfoMs = 0;
     for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
@@ -463,17 +572,21 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       const groupWork = resolve(work, `group-${groupIndex}`);
       await mkdir(groupWork, { recursive: true });
       const combinedOutput = resolve(groupWork, "source.txt");
+      const mappingFile = resolve(groupWork, "mapping.txt");
       const chunks: Buffer[] = [];
+      const mappingLines: string[] = [];
+      const markers: ProvenanceMarker[] = [];
+      let contentIndex = 0;
       for (const item of group.items) {
-        chunks.push(Buffer.from(`${formatFileBanner(item.input.displayPath)}\n`));
-        chunks.push(await readFile(item.value.output));
-        chunks.push(Buffer.from("\n"));
+        const sourceIndex = inputs.indexOf(item.input);
+        contentIndex = await buildProvenanceMapping(item.input, item.value, sourceIndex, contentIndex, `VCM-${groupIndex}-${sourceIndex}`, markers, mappingLines, chunks);
       }
       await writeFile(combinedOutput, Buffer.concat(chunks));
+      await writeFile(mappingFile, `${mappingLines.join("\n")}\n`);
       const pdf = resolve(groupWork, "source.pdf");
       status(`laying out ${group.items.length} files · ${group.profile.name}`);
       const typstStarted = performance.now();
-      await run("typst", ["compile", "--root", root, "--font-path", fontDir, "--input", `source=../${combinedOutput.slice(root.length + 1)}`, "--input", `font=${group.profile.font}`, "--input", `cols=${group.profile.columns}`, "--input", `scale=${group.profile.scale}`, "--input", `size=${group.profile.fontSize}`, "--input", `leading=${group.profile.leading}`, "--input", `margin=${group.profile.sideMargin}`, "--input", `gutter=${group.profile.gutter}`, resolve(root, "typst/source.typ"), pdf]);
+      await run("typst", ["compile", "--root", root, "--font-path", fontDir, "--input", `source=../${combinedOutput.slice(root.length + 1)}`, "--input", `mapping=../${mappingFile.slice(root.length + 1)}`, "--input", `font=${group.profile.font}`, "--input", `cols=${group.profile.columns}`, "--input", `scale=${group.profile.scale}`, "--input", `size=${group.profile.fontSize}`, "--input", `leading=${group.profile.leading}`, "--input", `margin=${group.profile.sideMargin}`, "--input", `gutter=${group.profile.gutter}`, resolve(root, "typst/source.typ"), pdf]);
       typstMs += elapsedMs(typstStarted);
       const pdfInfoStarted = performance.now();
       const { stdout: pdfInfo } = await run("pdfinfo", [pdf]);
@@ -481,7 +594,11 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       const pageCount = Number(pdfInfo.match(/^Pages:\s+(\d+)/m)?.[1] ?? 0);
       if (!pageCount) throw new Error(`renderer produced no PDF pages for ${group.profile.name}`);
       const fontsUsed = await readPdfFonts(pdf);
-      prepared.push({ group, work: groupWork, pdf, pageCount, language: group.items.length === 1 ? group.items[0].input.language : language, fontsUsed });
+      const provenanceStarted = performance.now();
+      const provenancePages = await queryProvenance(resolve(root, "typst/source.typ"), combinedOutput, mappingFile, fontDir, group.profile);
+      const provenanceMs = elapsedMs(provenanceStarted);
+      timings.provenance = (timings.provenance ?? 0) + provenanceMs;
+      prepared.push({ group, work: groupWork, pdf, pageCount, language: group.items.length === 1 ? group.items[0].input.language : language, fontsUsed, markers, provenancePages });
     }
     timings.typst = typstMs;
     timings.pdfinfo = pdfinfoMs;
@@ -493,7 +610,8 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const renderedGroups: PdfRenderResult[] = [];
     let completed = 0;
     for (const preparedGroup of prepared) {
-      const result = await renderPdfPages(preparedGroup.pdf, preparedGroup.work, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language, status, completed, totalPageCount);
+      const groupStart = completed;
+      const result = await renderPdfPages(preparedGroup.pdf, preparedGroup.work, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language, status, groupStart, totalPageCount, (_page, _groupTotal, globalPage) => `VC-${String(globalPage).padStart(3, "0")} | ${preparedGroup.language} | ${globalPage}/${totalPageCount} | ${preparedGroup.group.profile.name}`);
       completed += result.images.length;
       renderedGroups.push(result);
     }
@@ -504,8 +622,9 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const pageDimensions = renderedGroups.flatMap((group) => group.pageDimensions);
     const lastPage = renderedGroups.at(-1)!.finalPage;
     const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers, fontsUsed: group.fontsUsed }));
+    const tablets = prepared.flatMap((group, index) => buildGroupTablets(group.markers, group.provenancePages, group.pageCount, group.group.profile.name, renderedGroups[index].pageDimensions)).map((tablet, index) => ({ ...tablet, id: `VC-${String(index + 1).padStart(3, "0")}`, pageIndex: index + 1 }));
     const fontsUsed = [...new Set(prepared.flatMap((group) => group.fontsUsed))].sort();
-    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
+    const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, tablets, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
     const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, codec: item.value.codec, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
     if (cacheEnabled()) await publishCache(cacheDirectory, key, manifest, sourceManifests, images);
     return { images, manifest, sourceManifests };
