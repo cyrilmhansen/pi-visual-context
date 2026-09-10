@@ -83,6 +83,49 @@ export function findActiveTablet(context: ActiveSourceContext, id: string): Navi
   return context.tablets.find((tablet) => tablet.id === id);
 }
 
+export type SnapshotTabletResolution = {
+  tablet: SourceContextTablet;
+  sources: SourceContextSource[];
+  artifacts: SourceContextSnapshotV1["artifacts"];
+};
+
+export function resolveSnapshotTablet(snapshot: SourceContextSnapshotV1, id: string): SnapshotTabletResolution | undefined {
+  const tablet = snapshot.tablets.find((candidate) => candidate.id === id);
+  if (!tablet) return undefined;
+  const sources = [...new Set(tablet.spans.map((span) => span.sourceIndex))].map((sourceIndex) => snapshot.sources[sourceIndex]).filter((source): source is SourceContextSource => Boolean(source));
+  const artifacts = snapshot.artifacts.filter((artifact) => artifact.artifactId === tablet.artifactId);
+  return { tablet, sources, artifacts };
+}
+
+export type SnapshotSymbolResolution = {
+  symbol: SourceContextSymbol;
+  source: SourceContextSource;
+  tablets: SourceContextTablet[];
+  artifacts: SourceContextSnapshotV1["artifacts"];
+};
+
+export function resolveSnapshotSymbol(snapshot: SourceContextSnapshotV1, query: string): { resolved?: SnapshotSymbolResolution; candidates?: SourceContextSymbol[]; error?: "not-found" | "ambiguous" } {
+  const qualified = snapshot.symbols.filter((symbol) => symbol.qualifiedName === query);
+  const candidates = qualified.length ? qualified : snapshot.symbols.filter((symbol) => symbol.name === query);
+  if (!candidates.length) return { error: "not-found" };
+  if (candidates.length > 1) return { candidates, error: "ambiguous" };
+  const symbol = candidates[0];
+  const source = snapshot.sources[symbol.sourceIndex];
+  const tablets = snapshot.tablets.filter((tablet) => symbol.tabletIds.includes(tablet.id));
+  const artifacts = [...new Map(tablets.map((tablet) => snapshot.artifacts.find((artifact) => artifact.artifactId === tablet.artifactId)).filter((artifact): artifact is SourceContextSnapshotV1["artifacts"][number] => Boolean(artifact)).map((artifact) => [artifact.artifactId, artifact])).values()];
+  return source ? { resolved: { symbol, source, tablets, artifacts } } : { error: "not-found" };
+}
+
+export function searchSnapshotSymbols(snapshot: SourceContextSnapshotV1, query?: string, limit = 100): { symbols: SourceContextSymbol[]; total: number; shown: number; truncated: boolean } {
+  const matches = query === undefined ? [...snapshot.symbols] : snapshot.symbols
+    .map((symbol, index) => ({ symbol, index, rank: symbol.qualifiedName === query ? 0 : symbol.name === query ? 1 : symbol.qualifiedName.toLowerCase().includes(query.toLowerCase()) || symbol.name.toLowerCase().includes(query.toLowerCase()) ? 2 : 3 }))
+    .filter((item) => item.rank < 3)
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.symbol);
+  const symbols = matches.slice(0, limit);
+  return { symbols, total: matches.length, shown: symbols.length, truncated: matches.length > symbols.length };
+}
+
 type NavigableSymbolResult = SymbolAnchor | SourceContextSymbol;
 export type ResolvedSymbol = { symbol: NavigableSymbolResult; visualNames: string[] };
 

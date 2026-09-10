@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { isAbsolute, normalize, posix } from "node:path";
 import type { RenderManifest, RenderInput } from "./render-types.ts";
 import type { SymbolAnchor, SymbolDiagnostic } from "./symbols.ts";
@@ -134,6 +135,12 @@ export function buildSourceContextSnapshot(manifest: RenderManifest, inputs: rea
   const snapshot = { ...base, snapshotId: snapshotIdFor(base) };
   validateSourceContextSnapshot(snapshot);
   return { snapshot, artifacts: [...new Map(artifacts.map((artifact, index) => [artifact.artifactId, { artifactId: artifact.artifactId, data: images[index] }])).values()] };
+}
+
+export async function readSourceContextSnapshot(path: string): Promise<SourceContextSnapshotV1> {
+  const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+  validateSourceContextSnapshot(parsed);
+  return parsed;
 }
 
 export function validateSourceContextSnapshot(value: unknown): asserts value is SourceContextSnapshotV1 {

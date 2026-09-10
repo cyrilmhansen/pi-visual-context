@@ -20,7 +20,7 @@ headless par Pi et Atlas Agent.
 | **0.4e — Consultation locale de l’index symbolique** ✓ | Inspecter et désambiguïser le snapshot actif | `--symbols`, recherche locale bornée, sans modèle ni rendu |
 | **0.5a — Core boundary** ✓ | Séparer le moteur du frontend Pi | Pipeline SOURCE invocable par API TypeScript sans charger Pi |
 | **0.5b — Portable Source Context contract** ✓ | Définir un contrat machine versionné | Snapshot v1 compréhensible par un consommateur externe, indépendant de Pi et Typst |
-| **0.5c — Headless CLI** | Utiliser le cœur sans Pi | CLI JSON déterministe, diagnostics sur stderr, aucun modèle ni état conversationnel |
+| **0.5c — Headless CLI** ✓ | Utiliser le cœur sans Pi | CLI JSON déterministe, bundle snapshot+artefacts, diagnostics sur stderr, aucun modèle ni état conversationnel |
 | **0.5d — Atlas Agent adapter** | Rendre le service utilisable par Atlas Agent | Atlas Agent récupère snapshots, artefacts et provenance dans son infrastructure qualifiée |
 | **0.5e — Trace / observabilité Atlas Agent** | Rendre l’exécution observable | Event stream exploitable en console, JSONL durable et replay/post-mortem |
 | **0.6 — Dogfooding Atlas Agent** | Piloter la suite par l’usage réel | Frictions répétées collectées et priorisées avant les nouvelles fonctionnalités structurantes |
@@ -111,9 +111,13 @@ indépendante de Pi, Typst, du cache et du manifest debug. Il fournit :
 
 Le manifest historique de debug Pi reste séparé du contrat portable.
 
-### 0.5c — Headless CLI
+### 0.5c — Headless CLI ✓
 
-Interface conceptuelle :
+La CLI headless réutilise `prepareSourceContext()` et les primitives data-level
+de navigation sans charger Pi. Elle publie un bundle `snapshot.json` +
+`artifacts/` et sépare strictement JSON stdout et diagnostics stderr.
+
+Interface :
 
 ```text
 pvc prepare ...

@@ -133,6 +133,23 @@ Pi ImageContent attachment(s)
 
 Pi will then persist the images as part of the conversation session. Multiple files are compacted into one continuous Typst document with compact centered graphical transition bands. `--render` runs the same pipeline but stops after writing the PNGs and manifest, without calling a model; `--open` additionally opens the first PNG when a native viewer is available.
 
+## Headless CLI
+
+The `pvc` entrypoint uses the same core without loading the Pi extension. It does not call a model or maintain conversation state:
+
+```text
+pvc prepare --cwd <project> --output <bundle-dir> [--profile normal|conservative] <sources...>
+pvc resolve-tablet --snapshot <snapshot.json> <VC-ID>
+pvc resolve-symbol --snapshot <snapshot.json> <symbol>
+pvc symbols --snapshot <snapshot.json> [query]
+```
+
+`prepare` writes a portable bundle containing `snapshot.json` and an
+`artifacts/` directory. Successful commands write machine-readable JSON only
+to stdout; progress and diagnostics go to stderr. The resolve and symbols
+commands use only the snapshot metadata, so they work after the original
+sources, cache, project state, and Pi session have been removed.
+
 Build the local Rust and C helpers once before use:
 
 ```bash
