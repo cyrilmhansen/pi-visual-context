@@ -175,6 +175,15 @@ Debug manifests also include best-effort local Git provenance for each distinct 
 
 SOURCE tablets are addressable as `VC-001`, `VC-002`, and so on. The identifier depends on final SOURCE page order and is visible in the SOURCE header. Manifests record each tablet’s profile, dimensions, original source paths, and 1-based inclusive original line spans. A wrapped source line may legitimately occur in two adjacent tablets. TASK tablets do not receive VC identifiers.
 
+When SOURCE images are attached, the model-facing text also contains a compact tablet index, for example:
+
+```text
+VC-001 foo.py:1-184
+VC-002 foo.py:184-320 | bar.c:1-37
+```
+
+This is an address map, not a second copy of the source. It uses the canonical `source.tablets` provenance, preserves visual names and overlapping line ranges, and marks empty files as `file.py:empty`. In unusual visual names, `|`, `:`, backslashes, and line breaks are escaped with a backslash.
+
 The generic text fallback preserves text structure without parsing Markdown, JSON, YAML, or other grammars. It normalizes CRLF/CR to LF and expands tabs to four spaces deterministically. Specialized `.rs`, `.c`/`.h`, and `.py` codecs always take priority. Unicode text follows the same normal/conservative Romulus classification as source files.
 
 The final rendered PNGs are cached locally after a successful render. Source entries remain in `.pi/visual-context/cache/`; opt-in TASK entries use the separate `.pi/visual-context/cache/task/` namespace. Cache entries are content-addressed and invalidated automatically when any source, profile, visual name, template, font, codec convention, or renderer parameter changes. Opt-in `--visual-prompt` renders the natural-language question as separate TASK tablets before the SOURCE tablets; its cache is keyed only by the exact prompt and task renderer identity. For short questions, the historical text mode is usually more efficient. The cache key does not fingerprint the host's system fallback-font inventory: if installed fonts change, use `PI_VISUAL_CONTEXT_CACHE=0` once or purge `.pi/visual-context/cache/` and `.pi/visual-context/cache/task/`. Debug output remains per invocation; set `PI_VISUAL_CONTEXT_CACHE=0` (also accepts `false`, `no`, or `off`) to disable both caches.

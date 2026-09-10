@@ -354,9 +354,9 @@ async function compactFile(input: RenderInput, outDir: string, status: (text: st
   return compactText(input.path, outDir, status);
 }
 
-type ProvenanceSpan = { sourceIndex: number; sourcePath: string; visualName: string; startLine: number | null; endLine: number | null; bannerOnly?: boolean };
+export type ProvenanceSpan = { sourceIndex: number; sourcePath: string; visualName: string; startLine: number | null; endLine: number | null; bannerOnly?: boolean };
 type ProvenanceMarker = { contentIndex: number; start: number; end: number; startMarker: string; endMarker: string; span: ProvenanceSpan };
-type GroupTablet = { id?: string; pageIndex: number; profile: VisualProfile["name"]; width: number; height: number; spans: ProvenanceSpan[] };
+export type GroupTablet = { id?: string; pageIndex: number; profile: VisualProfile["name"]; width: number; height: number; spans: ProvenanceSpan[] };
 
 function sourceLineCount(source: string): number {
   if (source.length === 0) return 0;

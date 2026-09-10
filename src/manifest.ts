@@ -1,5 +1,6 @@
 import type { RenderManifest } from "./rust";
 import type { TaskManifest } from "./task.ts";
+import { buildSourceTabletIndex } from "./tablet-index.ts";
 
 export type RenderedSource = { path: string; manifest: RenderManifest };
 
@@ -22,8 +23,10 @@ export function buildRequestManifest(
   const metrics = globalMetrics(rendered);
   const pageDimensions = rendered.flatMap((item) => item.manifest.pageDimensions);
   const pages = pageFiles.flat();
-  if (rendered.length === 1) return { ...rendered[0].manifest, sourcePath: rendered[0].path, pages, sources, globalMetrics: metrics, tabletSourcesKnown: true, usage };
-  return { profile, sources, pages, pageCount: pages.length, pageDimensions, tablets: rendered.flatMap((item) => item.manifest.tablets ?? []), tabletSources: rendered.flatMap((item) => item.manifest.tablets ?? []), tabletSourcesKnown: true, globalMetrics: metrics, usage };
+  const tablets = rendered.flatMap((item) => item.manifest.tablets ?? []);
+  const tabletIndex = buildSourceTabletIndex(tablets);
+  if (rendered.length === 1) return { ...rendered[0].manifest, sourcePath: rendered[0].path, pages, sources, tabletIndex, globalMetrics: metrics, tabletSourcesKnown: true, usage };
+  return { profile, sources, pages, pageCount: pages.length, pageDimensions, tablets, tabletSources: tablets, tabletSourcesKnown: true, tabletIndex, globalMetrics: metrics, usage };
 }
 
 export function buildVisualPromptRequestManifest(
@@ -37,7 +40,7 @@ export function buildVisualPromptRequestManifest(
   return {
     visualPrompt: true,
     task: { ...task, pages: taskFiles },
-    source: source ? { ...source, pages: sourceFiles, sources: sourceManifests.map((item) => ({ ...item.manifest, sourcePath: item.path })) } : null,
+    source: source ? { ...source, pages: sourceFiles, sources: sourceManifests.map((item) => ({ ...item.manifest, sourcePath: item.path })), tabletIndex: buildSourceTabletIndex(source.tablets ?? []) } : null,
     pageCount: taskFiles.length + sourceFiles.length,
     sourceChars: source?.sourceChars ?? 0,
     globalMetrics: { sourceChars: source?.sourceChars ?? 0, sourceBytes: source?.sourceBytes ?? 0, encodedChars: source?.encodedChars ?? 0, removedChars: source?.removedChars ?? 0 },
@@ -52,15 +55,17 @@ export function buildContinuousRequestManifest(
   manifest: RenderManifest,
   usage: Record<string, unknown>,
 ) {
+  const tablets = manifest.tablets ?? [];
   return {
     ...manifest,
     sources: sourceManifests.map((item) => ({ ...item.manifest, sourcePath: item.path })),
     pages: pageFiles,
     pageCount: pageFiles.length,
     globalMetrics: globalMetrics(sourceManifests),
-    tablets: manifest.tablets ?? [],
-    tabletSources: manifest.tablets ?? [],
+    tablets,
+    tabletSources: tablets,
     tabletSourcesKnown: true,
+    tabletIndex: buildSourceTabletIndex(tablets),
     usage,
   };
 }

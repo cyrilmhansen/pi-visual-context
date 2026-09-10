@@ -10,6 +10,7 @@ import { confirmFileBudget, confirmTabletBudget, maxTabletsFromEnvironment } fro
 import { openPreview } from "./preview";
 import { registerVisualContextCommand } from "./command";
 import { renderTask } from "./task.ts";
+import { buildHistoricalSourcePrompt, buildVisualSourcePrompt } from "./tablet-index.ts";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -107,9 +108,10 @@ export default function (pi: ExtensionAPI) {
       }
       active = { manifestPath, manifest: requestManifest };
       ctx.ui.setStatus("visual-context", undefined);
+      const sourceTablets = rendered?.manifest.tablets ?? [];
       return {
         action: "transform",
-        text: visualPrompt ? (sourcePaths.length ? "Use the attached visual task and source context to answer." : "Use the attached visual task to answer.") : `Use the attached visual source context to answer the question.\n\n${question}`,
+        text: visualPrompt ? (sourcePaths.length ? buildVisualSourcePrompt(sourceTablets) : "Use the attached visual task to answer.") : buildHistoricalSourcePrompt(question, sourceTablets),
         images: [...(event.images ?? []), ...images.map((data) => ({ type: "image" as const, data: data.toString("base64"), mimeType: "image/png" as const }))],
       };
     } catch (error) {

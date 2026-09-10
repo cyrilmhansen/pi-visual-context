@@ -14,11 +14,32 @@ import { VISUAL_CONTEXT_HELP } from "../src/help.ts";
 import { registerVisualContextCommand } from "../src/command.ts";
 import { collectGitProvenance } from "../src/git.ts";
 import { renderTask } from "../src/task.ts";
+import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
 const pythonHelper = join(root, "tools/python-strip-lex/target/release/python-strip-lex");
 const font = join(root, "assets/fonts/romulus/Romulus.ttf");
+
+test("builds the compact source tablet index from canonical tablets", () => {
+  const tablets = [
+    { id: "VC-001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/foo.py", visualName: "foo.py", startLine: 1, endLine: 184 }] },
+    { id: "VC-002", pageIndex: 2, profile: "normal", width: 1, height: 1, spans: [
+      { sourceIndex: 0, sourcePath: "/tmp/foo.py", visualName: "foo.py", startLine: 184, endLine: 320 },
+      { sourceIndex: 1, sourcePath: "/tmp/bar.py", visualName: "bar.py", startLine: 1, endLine: 37 },
+    ] },
+    { id: "VC-003", pageIndex: 3, profile: "conservative", width: 1, height: 1, spans: [
+      { sourceIndex: 2, sourcePath: "/tmp/empty.py", visualName: "empty.py", startLine: null, endLine: null, bannerOnly: true },
+      { sourceIndex: 3, sourcePath: "/tmp/a b|c:d.py", visualName: "a b|c:d.py", startLine: 2, endLine: 4 },
+      { sourceIndex: 4, sourcePath: "/tmp/line\nname.py", visualName: "line\nname.py", startLine: 5, endLine: 6 },
+    ] },
+  ];
+  const index = "VC-001 foo.py:1-184\nVC-002 foo.py:184-320 | bar.py:1-37\nVC-003 empty.py:empty | a b\\|c\\:d.py:2-4 | line\\nname.py:5-6";
+  assert.equal(buildSourceTabletIndex(tablets), index);
+  assert.equal(buildHistoricalSourcePrompt("original  question", tablets), `Use the attached visual source context to answer the question.\n\nSource tablet index:\n${index}\n\noriginal  question`);
+  assert.equal(buildVisualSourcePrompt(tablets), `Use the attached visual task and source context to answer.\n\nSource tablet index:\n${index}`);
+  assert.equal(buildVisualSourcePrompt([]), "Use the attached visual task and source context to answer.");
+});
 
 test("registers a local /visual-context help command without model work", async () => {
   const commands = [];
@@ -610,6 +631,8 @@ test("visual task manifest keeps task pages before source pages and supports TAS
   assert.equal(manifest.source, null);
   assert.equal(manifest.totalTablets, result.manifest.pageCount);
   assert.equal(manifest.pageCount, result.manifest.pageCount);
+  const sourceManifest = buildVisualPromptRequestManifest(result.manifest, ["task-001.png"], { tablets: [{ id: "VC-001", pageIndex: 1, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/a.py", visualName: "a.py", startLine: 1, endLine: 2 }] }] }, [], ["source-001.png"], {});
+  assert.equal(sourceManifest.source.tabletIndex, "VC-001 a.py:1-2");
 });
 
 test("raster worker policy is bounded and page mapping preserves order", async () => {
