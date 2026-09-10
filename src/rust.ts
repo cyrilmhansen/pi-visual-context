@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { collectGitProvenance, type GitProvenance } from "./git.ts";
 import { extractAllSymbols, mapSymbolsToTablets, SYMBOL_INDEX_VERSION, type SymbolAnchor, type SymbolDiagnostic, type SymbolInput } from "./symbols.ts";
+import { loadProjectContext, reserveTabletIds } from "./project.ts";
 
 const run = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -204,6 +205,7 @@ export type RenderOptions = {
   beforeRasterize?: (pageCount: number, sourceChars: number) => Promise<boolean>;
   onCacheHit?: (pageCount: number, sourceChars: number) => Promise<boolean>;
   cacheDirectory?: string;
+  projectRoot?: string;
   readMs?: number;
   git?: GitProvenance;
   gitRepositoryIds?: (number | null)[];
@@ -270,20 +272,20 @@ async function loadRomulusCodepoints(): Promise<Set<number>> {
   return parseFontCharset(stdout);
 }
 
-const CACHE_SCHEMA_VERSION = 3;
-const PIPELINE_VERSION = "0.4.0-source-tablets-1";
+const CACHE_SCHEMA_VERSION = 4;
+const PIPELINE_VERSION = "0.4.0-persistent-vc-1";
 const cacheEnabled = () => !["0", "false", "no", "off"].includes((process.env.PI_VISUAL_CONTEXT_CACHE ?? "1").toLowerCase());
 const sha256 = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const elapsedMs = (started: number) => Math.round((performance.now() - started) * 100) / 100;
 
 type CacheRecord = {
-  cache: { schemaVersion: number; key: string };
+  cache: { schemaVersion: number; key: string; projectPrefix?: string };
   manifest: RenderManifest;
   sourceManifests: { path: string; manifest: RenderManifest }[];
   pages: { file: string; sha256: string }[];
 };
 
-async function cacheKey(inputs: RenderInput[], profile: VisualProfile): Promise<{ key: string; sourceBytes: number; sourceChars: number }> {
+async function cacheKey(inputs: RenderInput[], profile: VisualProfile, prefix: string): Promise<{ key: string; sourceBytes: number; sourceChars: number }> {
   const sources = [];
   let sourceBytes = 0;
   let sourceChars = 0;
@@ -295,16 +297,16 @@ async function cacheKey(inputs: RenderInput[], profile: VisualProfile): Promise<
   }
   const template = await readFile(resolve(root, "typst/source.typ"));
   const font = await readFile(resolve(root, "assets/fonts/romulus/Romulus.ttf"));
-  const identity = { cacheSchemaVersion: CACHE_SCHEMA_VERSION, pipelineVersion: PIPELINE_VERSION, sources, profile, renderer: { typstTemplateSha256: sha256(template), fontSha256: sha256(font), rasterDpi: 1152, outputSize: "1056x960", headerHeight: HEADER_HEIGHT } };
+  const identity = { cacheSchemaVersion: CACHE_SCHEMA_VERSION, pipelineVersion: PIPELINE_VERSION, projectPrefix: prefix, sources, profile, renderer: { typstTemplateSha256: sha256(template), fontSha256: sha256(font), rasterDpi: 1152, outputSize: "1056x960", headerHeight: HEADER_HEIGHT } };
   return { key: sha256(JSON.stringify(identity)), sourceBytes, sourceChars };
 }
 
-async function loadCache(directory: string, key: string): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] } | undefined> {
+async function loadCache(directory: string, key: string, prefix: string): Promise<{ images: Buffer[]; manifest: RenderManifest; sourceManifests: { path: string; manifest: RenderManifest }[] } | undefined> {
   const entry = resolve(directory, key);
   const invalid = async () => { await rm(entry, { recursive: true, force: true }); return undefined; };
   try {
     const record = JSON.parse(await readFile(resolve(entry, "cache-manifest.json"), "utf8")) as CacheRecord;
-    if (record.cache?.schemaVersion !== CACHE_SCHEMA_VERSION || record.cache.key !== key || !Array.isArray(record.pages) || !record.manifest || !record.sourceManifests) return invalid();
+    if (record.cache?.schemaVersion !== CACHE_SCHEMA_VERSION || record.cache.key !== key || record.cache.projectPrefix !== prefix || !Array.isArray(record.pages) || !record.manifest || !record.sourceManifests) return invalid();
     const images: Buffer[] = [];
     for (const page of record.pages) {
       if (typeof page.file !== "string" || !/^page-\d{3}\.png$/.test(page.file) || typeof page.sha256 !== "string") return invalid();
@@ -319,7 +321,7 @@ async function loadCache(directory: string, key: string): Promise<{ images: Buff
   }
 }
 
-async function publishCache(directory: string, key: string, manifest: RenderManifest, sourceManifests: { path: string; manifest: RenderManifest }[], images: Buffer[]): Promise<void> {
+async function publishCache(directory: string, key: string, prefix: string, manifest: RenderManifest, sourceManifests: { path: string; manifest: RenderManifest }[], images: Buffer[]): Promise<void> {
   await mkdir(directory, { recursive: true });
   const temporary = await mkdtemp(resolve(directory, `.tmp-${key.slice(0, 12)}-`));
   try {
@@ -330,7 +332,7 @@ async function publishCache(directory: string, key: string, manifest: RenderMani
       pages.push({ file, sha256: sha256(images[index]) });
     }
     const cachedSources = sourceManifests.map((item) => ({ ...item, path: "" }));
-    await writeFile(resolve(temporary, "cache-manifest.json"), `${JSON.stringify({ cache: { schemaVersion: CACHE_SCHEMA_VERSION, key }, manifest, sourceManifests: cachedSources, pages }, null, 2)}\n`);
+    await writeFile(resolve(temporary, "cache-manifest.json"), `${JSON.stringify({ cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, projectPrefix: prefix }, manifest, sourceManifests: cachedSources, pages }, null, 2)}\n`);
     try { await rename(temporary, resolve(directory, key)); } catch (error: any) {
       if (error?.code !== "EEXIST") throw error;
       await rm(temporary, { recursive: true, force: true });
@@ -520,13 +522,16 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
   const totalStarted = performance.now();
   const readStarted = performance.now();
   const gitState = options.git ? { provenance: options.git, repositoryIds: options.gitRepositoryIds ?? inputs.map(() => null) } : await collectGitProvenance(inputs.map((input) => input.path));
-  const identity = await cacheKey(inputs, profile);
+  const fallbackProjectRoot = options.projectRoot;
+  const projectRoot = gitState.provenance.repositories.length === 1 ? gitState.provenance.repositories[0].root : fallbackProjectRoot;
+  const cacheDirectory = options.cacheDirectory ?? resolve(projectRoot ?? root, ".pi", "visual-context", "cache");
+  const projectContext = await loadProjectContext({ projectRoot, cacheDirectory });
+  const identity = await cacheKey(inputs, profile, projectContext.state.prefix);
   const timings: Record<string, number> = { read: Math.round(((options.readMs ?? 0) + elapsedMs(readStarted)) * 100) / 100 };
-  const cacheDirectory = options.cacheDirectory ?? resolve(root, ".pi", "visual-context", "cache");
   const key = identity.key;
   if (cacheEnabled()) {
     const lookupStarted = performance.now();
-    const cached = await loadCache(cacheDirectory, key);
+    const cached = await loadCache(cacheDirectory, key, projectContext.state.prefix);
     timings.cacheLookup = elapsedMs(lookupStarted);
     if (cached) {
       if (options.onCacheHit && !await options.onCacheHit(cached.manifest.pageCount, identity.sourceChars)) throw new RenderCancelled();
@@ -624,13 +629,15 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const totalPageCount = prepared.reduce((sum, group) => sum + group.pageCount, 0);
     status(`PDF ready: ${totalPageCount} tablets`);
     if (options.beforeRasterize && !await options.beforeRasterize(totalPageCount, sourceChars)) throw new RenderCancelled();
+    const reservation = await reserveTabletIds(projectContext, totalPageCount);
+    const assignedTabletIds = reservation.ids;
     const configuredWorkers = rasterWorkerCount(totalPageCount);
     const rasterStarted = performance.now();
     const renderedGroups: PdfRenderResult[] = [];
     let completed = 0;
     for (const preparedGroup of prepared) {
       const groupStart = completed;
-      const result = await renderPdfPages(preparedGroup.pdf, preparedGroup.work, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language, status, groupStart, totalPageCount, (_page, _groupTotal, globalPage) => `VC-${String(globalPage).padStart(3, "0")} | ${preparedGroup.language} | ${globalPage}/${totalPageCount} | ${preparedGroup.group.profile.name}`);
+      const result = await renderPdfPages(preparedGroup.pdf, preparedGroup.work, preparedGroup.pageCount, preparedGroup.group.profile, preparedGroup.language, status, groupStart, totalPageCount, (_page, _groupTotal, globalPage) => `${assignedTabletIds[globalPage - 1]} | ${preparedGroup.language} | ${globalPage}/${totalPageCount} | ${preparedGroup.group.profile.name}`);
       completed += result.images.length;
       renderedGroups.push(result);
     }
@@ -641,7 +648,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const pageDimensions = renderedGroups.flatMap((group) => group.pageDimensions);
     const lastPage = renderedGroups.at(-1)!.finalPage;
     const renderGroups = prepared.map((group, index) => ({ profile: group.group.profile.name, reason: group.group.reason, sources: group.group.items.map((item) => item.input.displayPath), pageCount: group.pageCount, pageDimensions: renderedGroups[index].pageDimensions, workers: renderedGroups[index].workers, fontsUsed: group.fontsUsed }));
-    const tablets = prepared.flatMap((group, index) => buildGroupTablets(group.markers, group.provenancePages, group.pageCount, group.group.profile.name, renderedGroups[index].pageDimensions)).map((tablet, index) => ({ ...tablet, id: `VC-${String(index + 1).padStart(3, "0")}`, pageIndex: index + 1 }));
+    const tablets = prepared.flatMap((group, index) => buildGroupTablets(group.markers, group.provenancePages, group.pageCount, group.group.profile.name, renderedGroups[index].pageDimensions)).map((tablet, index) => ({ ...tablet, id: assignedTabletIds[index], pageIndex: index + 1 }));
     const fontsUsed = [...new Set(prepared.flatMap((group) => group.fontsUsed))].sort();
     const symbolStarted = performance.now();
     const symbolData = await extractAndMapSymbols(inputs, tablets);
@@ -649,7 +656,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     timings.total = elapsedMs(totalStarted);
     const manifest: RenderManifest = { sourceBytes, sourceChars, encodedChars, removedChars, reductionPercent, profile, requestedProfile: profile.name, renderGroups, tablets, symbols: symbolData.symbols, symbolDiagnostics: symbolData.diagnostics, symbolExtractorVersion: symbolData.version, fontsUsed, codec: new Set(compacted.map((item) => item.value.codec)).size === 1 ? compacted[0].value.codec : undefined, language, git: gitState.provenance, pageCount: images.length, pageDimensions, finalPage: { originalDimensions: { width: 1056, height: HEADER_HEIGHT + 960 }, croppedDimensions: { width: lastPage.width, height: lastPage.height }, columnsUsed: lastPage.columnsUsed, croppedRightPixels: lastPage.croppedRightPixels, croppedBottomPixels: lastPage.croppedBottomPixels }, timingsMs: timings, workers: configuredWorkers, cache: { schemaVersion: CACHE_SCHEMA_VERSION, key, hit: false } };
     const sourceManifests = compacted.map((item, index) => ({ path: item.input.path, manifest: { ...item.value, profile: (profile.name === "conservative" || classified.find((source) => source.input.path === item.input.path)?.classification.fallbackRequired) ? getVisualProfile("conservative") : getVisualProfile("normal"), language: item.input.language, codec: item.value.codec, gitRepository: gitState.repositoryIds[index] ?? null, pageCount: 0, pageDimensions: [], finalPage: manifest.finalPage } }));
-    if (cacheEnabled()) await publishCache(cacheDirectory, key, manifest, sourceManifests, images);
+    if (cacheEnabled()) await publishCache(cacheDirectory, key, projectContext.state.prefix, manifest, sourceManifests, images);
     return { images, manifest, sourceManifests };
   } finally {
     await rm(work, { recursive: true, force: true });

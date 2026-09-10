@@ -16,6 +16,7 @@ import { collectGitProvenance } from "../src/git.ts";
 import { renderTask } from "../src/task.ts";
 import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
 import { extractAllSymbols, mapSymbolsToTablets } from "../src/symbols.ts";
+import { loadProjectContext, reserveTabletIds } from "../src/project.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -85,6 +86,29 @@ test("symbol extraction failure is non-fatal for visual rendering", async () => 
   assert.ok(rendered.images.length >= 1);
   assert.deepEqual(rendered.manifest.symbols, []);
   assert.ok(Array.isArray(rendered.manifest.symbolDiagnostics));
+});
+
+test("project VC allocation is persistent, monotone, atomic, and cache-safe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-project-state-test-"));
+  const projectRoot = join(dir, "my-project");
+  const cache = join(projectRoot, ".pi", "visual-context", "cache");
+  const context = await loadProjectContext({ projectRoot, cacheDirectory: cache });
+  const [first, second] = await Promise.all([reserveTabletIds(context, 2), reserveTabletIds(context, 3)]);
+  assert.equal(new Set([...first.ids, ...second.ids]).size, 5);
+  assert.deepEqual([...first.ids, ...second.ids].sort(), ["MP-VC-000001", "MP-VC-000002", "MP-VC-000003", "MP-VC-000004", "MP-VC-000005"]);
+  assert.equal((await loadProjectContext({ projectRoot, cacheDirectory: cache })).state.nextTabletId, 6);
+  const failed = await reserveTabletIds(context, 2);
+  const afterFailure = await reserveTabletIds(context, 1);
+  assert.deepEqual(failed.ids, ["MP-VC-000006", "MP-VC-000007"]);
+  assert.deepEqual(afterFailure.ids, ["MP-VC-000008"]);
+  mkdirSync(join(cache, "old-cache"), { recursive: true });
+  mkdirSync(join(cache, "task"), { recursive: true });
+  writeFileSync(join(cache, "old-cache", "ignored.txt"), "old");
+  writeFileSync(join(cache, "task", "kept.txt"), "task");
+  rmSync(join(projectRoot, ".pi", "visual-context", "project.json"));
+  await loadProjectContext({ projectRoot, cacheDirectory: cache });
+  assert.equal(existsSync(join(cache, "old-cache")), false);
+  assert.equal(existsSync(join(cache, "task", "kept.txt")), true);
 });
 
 test("registers a local /visual-context help command without model work", async () => {
@@ -302,7 +326,8 @@ test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specia
   writeFileSync(crlf, "one\r\ntwo\tthree\r\n");
   const lfRender = await renderSources([{ path: lf, displayPath: "same.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "lf-cache") });
   const crlfRender = await renderSources([{ path: crlf, displayPath: "same.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "crlf-cache") });
-  assert.deepEqual(crlfRender.images, lfRender.images);
+  const stripHeader = (image) => execFileSync("magick", ["png:-", "-crop", "1056x960+0+20", "+repage", "png:-"], { input: image });
+  assert.deepEqual(stripHeader(crlfRender.images[0]), stripHeader(lfRender.images[0]));
   const binary = join(dir, "binary.bin");
   writeFileSync(binary, Buffer.from([0x41, 0x00, 0x42]));
   await assert.rejects(() => renderSources([{ path: binary, displayPath: "binary.bin", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "binary-cache") }), /text\/binary input/);
@@ -314,6 +339,11 @@ test("generic UTF-8 text fallback accepts text, rejects binary, and keeps specia
   const longRender = await renderSources([{ path: longLine, displayPath: "long-line.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "long-line-cache") });
   assert.ok(longRender.manifest.pageCount > 1);
   assert.ok(longRender.manifest.tablets.every((tablet) => tablet.spans.some((span) => span.startLine === 1 && span.endLine === 1)));
+  const longIds = longRender.manifest.tablets.map((tablet) => tablet.id);
+  writeFileSync(longLine, `${"changed-content ".repeat(4000)}\n`);
+  const changedLong = await renderSources([{ path: longLine, displayPath: "long-line.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "long-line-cache") });
+  assert.equal(changedLong.manifest.cache.hit, false);
+  assert.equal(longIds.some((id) => changedLong.manifest.tablets.some((tablet) => tablet.id === id)), false);
   const empty = join(dir, "empty.txt");
   writeFileSync(empty, "");
   const emptyRender = await renderSources([{ path: empty, displayPath: "empty.txt", language: "Text" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "empty-cache") });
@@ -475,7 +505,8 @@ test("mixed Unicode sources render normal before conservative groups", async () 
   assert.equal(first.manifest.renderGroups[0].profile, "normal");
   assert.equal(first.manifest.renderGroups[1].profile, "conservative");
   assert.equal(first.manifest.tablets.length, first.manifest.pageCount);
-  assert.deepEqual(first.manifest.tablets.map((tablet) => tablet.id), first.manifest.tablets.map((_, index) => `VC-${String(index + 1).padStart(3, "0")}`));
+  assert.ok(first.manifest.tablets.every((tablet) => /^[A-Z0-9]{1,4}-VC-\d{6}$/.test(tablet.id)));
+  assert.equal(new Set(first.manifest.tablets.map((tablet) => tablet.id)).size, first.manifest.tablets.length);
   assert.ok(first.manifest.tablets.every((tablet) => tablet.spans.every((span) => span.startLine === null || (span.startLine >= 1 && span.endLine >= span.startLine))));
   assert.ok(first.manifest.tablets.some((tablet) => tablet.spans.some((span) => span.sourceIndex === 0)));
   assert.ok(first.manifest.tablets.some((tablet) => tablet.spans.some((span) => span.sourceIndex === 2)));
@@ -536,7 +567,8 @@ test("final PNG cache hits without invoking layout or rasterization", async () =
   rmSync(join(cache, key, "page-001.png"));
   const repaired = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache });
   assert.equal(repaired.manifest.cache.hit, false);
-  assert.deepEqual(repaired.images, first.images);
+  assert.notDeepEqual(repaired.images, first.images);
+  assert.notDeepEqual(repaired.manifest.tablets.map((tablet) => tablet.id), first.manifest.tablets.map((tablet) => tablet.id));
   writeFileSync(source, "value = 2\n");
   const changed = await renderSources(input, () => {}, getVisualProfile("normal"), { cacheDirectory: cache });
   assert.equal(changed.manifest.cache.hit, false);
@@ -565,6 +597,64 @@ test("cache identity includes order, visual names, and profile", async () => {
   assert.equal(conservative.manifest.cache.hit, false);
   const hit = await render([{ path: a, displayPath: "a.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }]);
   assert.equal(hit.manifest.cache.hit, true);
+});
+
+test("persistent VC IDs version complete source snapshots and restore cached history", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-persistent-vc-test-"));
+  const projectRoot = join(dir, "project");
+  const cacheDirectory = join(projectRoot, ".pi", "visual-context", "cache");
+  mkdirSync(projectRoot, { recursive: true });
+  const a = join(projectRoot, "a.py");
+  const b = join(projectRoot, "b.py");
+  writeFileSync(a, "a = 1\n");
+  writeFileSync(b, "b = 1\n");
+  const inputs = [{ path: a, displayPath: "a.py", language: "Python" }, { path: b, displayPath: "b.py", language: "Python" }];
+  const render = () => renderSources(inputs, () => {}, getVisualProfile("normal"), { cacheDirectory, projectRoot });
+  const snapshotA = await render();
+  const idsA = snapshotA.manifest.tablets.map((tablet) => tablet.id);
+  const hitA = await render();
+  assert.equal(hitA.manifest.cache.hit, true);
+  assert.deepEqual(hitA.manifest.tablets.map((tablet) => tablet.id), idsA);
+  writeFileSync(a, "a = 2\n");
+  const snapshotB = await render();
+  const idsB = snapshotB.manifest.tablets.map((tablet) => tablet.id);
+  assert.equal(snapshotB.manifest.cache.hit, false);
+  assert.equal(idsA.some((id) => idsB.includes(id)), false);
+  writeFileSync(a, "a = 1\n");
+  const restoredA = await render();
+  assert.equal(restoredA.manifest.cache.hit, true);
+  assert.deepEqual(restoredA.manifest.tablets.map((tablet) => tablet.id), idsA);
+  const statePath = join(projectRoot, ".pi", "visual-context", "project.json");
+  rmSync(statePath);
+  const recoveredA = await render();
+  assert.equal(recoveredA.manifest.cache.hit, true);
+  assert.deepEqual(recoveredA.manifest.tablets.map((tablet) => tablet.id), idsA);
+  assert.equal(JSON.parse(readFileSync(statePath, "utf8")).nextTabletId, Math.max(...idsB.map((id) => Number(id.match(/(\d+)$/)[1]))) + 1);
+  const previousCache = process.env.PI_VISUAL_CONTEXT_CACHE;
+  process.env.PI_VISUAL_CONTEXT_CACHE = "0";
+  try {
+    const disabledOne = await render();
+    const disabledTwo = await render();
+    assert.equal(disabledOne.manifest.cache.hit, false);
+    assert.equal(disabledTwo.manifest.cache.hit, false);
+    assert.equal(new Set([...idsA, ...idsB, ...disabledOne.manifest.tablets.map((tablet) => tablet.id), ...disabledTwo.manifest.tablets.map((tablet) => tablet.id)]).size, idsA.length + idsB.length + disabledOne.manifest.tablets.length + disabledTwo.manifest.tablets.length);
+  } finally {
+    if (previousCache === undefined) delete process.env.PI_VISUAL_CONTEXT_CACHE;
+    else process.env.PI_VISUAL_CONTEXT_CACHE = previousCache;
+  }
+  writeFileSync(a, "a = 3\n");
+  const previousWorkers = process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+  process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "0";
+  try {
+    await assert.rejects(() => render(), /integer >= 1/);
+  } finally {
+    if (previousWorkers === undefined) delete process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
+    else process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = previousWorkers;
+  }
+  const afterFailure = await render();
+  const failedSeriesId = Number(afterFailure.manifest.tablets[0].id.match(/(\d+)$/)[1]);
+  const previousSeriesId = Number(idsA[0].match(/(\d+)$/)[1]);
+  assert.ok(failedSeriesId > previousSeriesId + 1);
 });
 
 test("Git provenance handles clean, dirty, detached, outside, and multiple repositories", async () => {
@@ -713,8 +803,9 @@ test("source provenance is deterministic across raster worker counts", async () 
     const one = await renderSources([{ path: source, displayPath: "source.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "one") });
     process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = "4";
     const four = await renderSources([{ path: source, displayPath: "source.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "four") });
-    assert.deepEqual(four.images, one.images);
-    assert.deepEqual(four.manifest.tablets, one.manifest.tablets);
+    const stripHeader = (image) => execFileSync("magick", ["png:-", "-crop", "1056x960+0+20", "+repage", "png:-"], { input: image });
+    assert.deepEqual(stripHeader(four.images[0]), stripHeader(one.images[0]));
+    assert.deepEqual(four.manifest.tablets.map(({ id, ...tablet }) => tablet), one.manifest.tablets.map(({ id, ...tablet }) => tablet));
   } finally {
     if (previous === undefined) delete process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS;
     else process.env.PI_VISUAL_CONTEXT_RASTER_WORKERS = previous;

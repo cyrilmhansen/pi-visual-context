@@ -72,6 +72,7 @@ export default function (pi: ExtensionAPI) {
         readMs: expansionMs,
         beforeRasterize: async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, preview ? "preview" : "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment(), preview ? "preview" : "normal"),
         onCacheHit: preview ? (visualPrompt ? async (tabletCount, sourceChars) => confirmTotal(tabletCount, sourceChars, "preview") : undefined) : async (tabletCount, sourceChars) => visualPrompt ? confirmTotal(tabletCount, sourceChars, "normal") : confirmTabletBudget(ctx.ui, sourcePaths.length, tabletCount, sourceChars, maxTabletsFromEnvironment()),
+        projectRoot: ctx.cwd,
       }) : undefined;
       const taskImages = taskResult?.images ?? [];
       const sourceImages = rendered?.images ?? [];

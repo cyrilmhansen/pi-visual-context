@@ -173,13 +173,13 @@ Debug manifests also include best-effort local Git provenance for each distinct 
 
 `--visual-prompt` can render only TASK tablets with no source files, or TASK tablets followed by SOURCE tablets. The short historical text mode remains preferable for short questions.
 
-SOURCE tablets are addressable as `VC-001`, `VC-002`, and so on. The identifier depends on final SOURCE page order and is visible in the SOURCE header. Manifests record each tablet’s profile, dimensions, original source paths, and 1-based inclusive original line spans. A wrapped source line may legitimately occur in two adjacent tablets. TASK tablets do not receive VC identifiers.
+SOURCE tablets receive persistent, project-scoped identifiers such as `AB-VC-000001`. They are allocated monotonically from `.pi/visual-context/project.json`, independently of final page order; cache HITs preserve the PNG and identifiers, while a changed snapshot receives a new complete series. IDs are visible in SOURCE headers and manifests. A wrapped source line may legitimately occur in two adjacent tablets. TASK tablets do not receive VC identifiers.
 
 When SOURCE images are attached, the model-facing text also contains a compact tablet index, for example:
 
 ```text
-VC-001 foo.py:1-184
-VC-002 foo.py:184-320 | bar.c:1-37
+AB-VC-000001 foo.py:1-184
+AB-VC-000002 foo.py:184-320 | bar.c:1-37
 ```
 
 This is an address map, not a second copy of the source. It uses the canonical `source.tablets` provenance, preserves visual names and overlapping line ranges, and marks empty files as `file.py:empty`. In unusual visual names, `|`, `:`, backslashes, and line breaks are escaped with a backslash.
