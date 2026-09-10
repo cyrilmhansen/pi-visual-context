@@ -11,7 +11,7 @@ import { openPreview } from "./preview.ts";
 import { registerVisualContextCommand } from "./command.ts";
 import { renderTask } from "./task.ts";
 import { buildHistoricalSourcePrompt, buildVisualSourcePrompt } from "./tablet-index.ts";
-import { activeSourceContextFromManifest, activeSourceContextFromStored, resolveNavigation, type ActiveSourceContext } from "./navigation.ts";
+import { activeSourceContextFromManifest, activeSourceContextFromStored, formatSymbolList, resolveNavigation, type ActiveSourceContext } from "./navigation.ts";
 
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 const imageHash = (data: Buffer | string) => createHash("sha256").update(typeof data === "string" ? Buffer.from(data, "base64") : data).digest("hex");
@@ -86,7 +86,14 @@ export default function (pi: ExtensionAPI) {
     const status = (text: string) => ctx.ui.setStatus("visual-context", `visual-context: ${text}`);
     try {
       const parsed = parseVisualInput(event.text);
-      const { sources, question, profile: profileName, render: preview, open, visualPrompt, tablet, symbol } = parsed;
+      const { sources, question, profile: profileName, render: preview, open, visualPrompt, tablet, symbol, symbols } = parsed;
+      if (symbols !== undefined) {
+        const listing = formatSymbolList(activeSourceContext, symbols || undefined);
+        if (listing.error) ctx.ui.notify(`@v symbols failed: ${listing.error}`, "error");
+        else ctx.ui.notify(listing.text!, "info");
+        ctx.ui.setStatus("visual-context", undefined);
+        return { action: "handled" };
+      }
       if (tablet || symbol) {
         const navigation = resolveNavigation(activeSourceContext, { tablet, symbol }, question);
         if (navigation.error) {

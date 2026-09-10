@@ -87,3 +87,33 @@ export function resolveNavigation(context: ActiveSourceContext | undefined, targ
   const result = resolveActiveSymbol(context, target.symbol!);
   return result.error ? { error: result.error } : { text: buildSymbolNavigationPrompt(result.resolved!, question) };
 }
+
+const SYMBOL_LIST_LIMIT = 100;
+
+function symbolLocation(context: ActiveSourceContext, symbol: SymbolAnchor): string {
+  const locations = new Set(context.tablets.flatMap((tablet) => tablet.spans
+    .filter((span) => span.sourceIndex === symbol.sourceIndex && span.startLine !== null && span.endLine !== null && span.startLine <= symbol.line && symbol.line <= span.endLine)
+    .map((span) => `${formatVisualName(span.visualName)}:${symbol.line}`)));
+  return [...locations].join(" | ") || `source:${symbol.sourceIndex}:${symbol.line}`;
+}
+
+export function formatSymbolList(context: ActiveSourceContext | undefined, query?: string): { text?: string; error?: string; total?: number; shown?: number } {
+  if (!context) return { error: "no active source context in this conversation" };
+  if (!context.symbols.length) return { text: "no symbol anchors are available in the active source context", total: 0, shown: 0 };
+  const matches = query === undefined ? [...context.symbols] : context.symbols
+    .map((symbol, index) => ({ symbol, index, rank: symbol.qualifiedName === query ? 0 : symbol.name === query ? 1 : symbol.qualifiedName.toLowerCase().includes(query.toLowerCase()) || symbol.name.toLowerCase().includes(query.toLowerCase()) ? 2 : 3 }))
+    .filter((item) => item.rank < 3)
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.symbol);
+  if (!matches.length) return { text: `no symbol anchors match "${query}" in the active source context`, total: 0, shown: 0 };
+  const shownSymbols = matches.slice(0, SYMBOL_LIST_LIMIT);
+  const nameWidth = Math.max(...shownSymbols.map((symbol) => (symbol.qualifiedName || symbol.name).length));
+  const kindWidth = Math.max(...shownSymbols.map((symbol) => symbol.kind.length));
+  const locationWidth = Math.max(...shownSymbols.map((symbol) => symbolLocation(context, symbol).length));
+  const lines = shownSymbols.map((symbol) => {
+    const name = symbol.qualifiedName || symbol.name;
+    return `${name.padEnd(nameWidth)}  ${symbol.kind.padEnd(kindWidth)}  ${symbolLocation(context, symbol).padEnd(locationWidth)}  ${symbol.tabletIds.join(", ")}`;
+  });
+  if (matches.length > SYMBOL_LIST_LIMIT) lines.push(`showing ${SYMBOL_LIST_LIMIT} of ${matches.length} symbols; use @v --symbols <query> to narrow the list`);
+  return { text: lines.join("\n"), total: matches.length, shown: shownSymbols.length };
+}

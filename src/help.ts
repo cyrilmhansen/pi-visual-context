@@ -20,13 +20,18 @@ Profiles:
   normal | conservative
 
 Languages: .rs .c .h .py (other files: generic UTF-8 text fallback)
+Inspect current source context:
+  @v --symbols
+  @v --symbols run
+  --symbols searches the local symbol index and does not call the model.
+
 Navigation in the current source context:
   @v --tablet PREFIX-VC-000123 -- question
   @v --symbol Executor.run -- question
   Navigation references tablets already attached; it does not resend images.
   One source context is allowed per conversation.
 
-Options: --visual-prompt  --render  --open  --profile conservative  --tablet  --symbol
+Options: --visual-prompt  --render  --open  --profile conservative  --symbols  --tablet  --symbol
 
 Environment:
   PI_VISUAL_CONTEXT_CONFIRM_FILES

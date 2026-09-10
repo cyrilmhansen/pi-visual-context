@@ -17,7 +17,7 @@ import { renderTask } from "../src/task.ts";
 import { buildHistoricalSourcePrompt, buildSourceTabletIndex, buildVisualSourcePrompt } from "../src/tablet-index.ts";
 import { extractAllSymbols, mapSymbolsToTablets } from "../src/symbols.ts";
 import { loadProjectContext, reserveTabletIds } from "../src/project.ts";
-import { activeSourceContextFromManifest, buildSymbolNavigationPrompt, buildTabletNavigationPrompt, resolveActiveSymbol, resolveNavigation } from "../src/navigation.ts";
+import { activeSourceContextFromManifest, buildSymbolNavigationPrompt, buildTabletNavigationPrompt, formatSymbolList, resolveActiveSymbol, resolveNavigation } from "../src/navigation.ts";
 
 const root = new URL("..", import.meta.url).pathname;
 const cHelper = join(root, "tools/c-strip-lex/target/release/c-strip-lex");
@@ -51,10 +51,19 @@ test("parses explicit tablet and symbol navigation without source paths", () => 
   assert.deepEqual(parseVisualInput("@v --symbol Executor.run -- Explain."), {
     source: undefined, sources: [], question: "Explain.", profile: "normal", render: false, open: false, visualPrompt: false, symbol: "Executor.run",
   });
+  assert.deepEqual(parseVisualInput("@v --symbols"), {
+    source: undefined, sources: [], question: "", profile: "normal", render: false, open: false, visualPrompt: false, symbols: "",
+  });
+  assert.deepEqual(parseVisualInput("@v --symbols Executor.run"), {
+    source: undefined, sources: [], question: "", profile: "normal", render: false, open: false, visualPrompt: false, symbols: "Executor.run",
+  });
   assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 foo.py -- question"), /source paths/);
   assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 --symbol Foo -- question"), /cannot be used together/);
   assert.throws(() => parseVisualInput("@v --symbol Foo --render -- question"), /--render/);
   assert.throws(() => parseVisualInput("@v --tablet AA-VC-000123 --"), /non-empty question/);
+  assert.throws(() => parseVisualInput("@v --symbols query extra.py"), /source paths/);
+  assert.throws(() => parseVisualInput("@v --symbols -- question"), /does not accept a question/);
+  assert.throws(() => parseVisualInput("@v --symbols --profile conservative"), /--profile/);
 });
 
 test("resolves navigation only against an immutable active source context", () => {
@@ -84,6 +93,35 @@ test("resolves navigation only against an immutable active source context", () =
   assert.equal(resolveActiveSymbol(context, "missing").error.includes("not found"), true);
   assert.match(buildTabletNavigationPrompt(context.tablets[0], "Why?"), /Why\?$/);
   assert.match(buildSymbolNavigationPrompt(resolveActiveSymbol(context, "Executor.run").resolved, "Explain."), /Source tablets: AA-VC-000123, AA-VC-000124/);
+});
+
+test("formats bounded local symbol inspection deterministically", () => {
+  const context = activeSourceContextFromManifest({
+    tablets: [{ id: "AA-VC-000123", pageIndex: 0, profile: "normal", width: 1, height: 1, spans: [{ sourceIndex: 0, sourcePath: "/tmp/a.py", visualName: "a.py", startLine: 1, endLine: 20 }] }],
+    symbols: [
+      { sourceIndex: 0, name: "run", qualifiedName: "Executor.run", kind: "method", line: 2, tabletIds: ["AA-VC-000123"] },
+      { sourceIndex: 0, name: "init", qualifiedName: "Executor.init", kind: "method", line: 3, tabletIds: ["AA-VC-000123"] },
+      { sourceIndex: 0, name: "runaway", qualifiedName: "runaway", kind: "function", line: 4, tabletIds: ["AA-VC-000123"] },
+    ],
+  });
+  assert.ok(context);
+  const all = formatSymbolList(context);
+  assert.equal(all.total, 3);
+  assert.equal(all.shown, 3);
+  assert.deepEqual(all.text.split("\n").map((line) => line.trim().split(/\s{2,}/)[0]), ["Executor.run", "Executor.init", "runaway"]);
+  assert.match(formatSymbolList(context, "Executor.run").text, /^Executor\.run/);
+  assert.equal(formatSymbolList(context, "init").shown, 1);
+  assert.equal(formatSymbolList(context, "EXECUTOR").shown, 2);
+  const many = activeSourceContextFromManifest({
+    tablets: context.tablets,
+    symbols: Array.from({ length: 105 }, (_, index) => ({ sourceIndex: 0, name: `symbol${index}`, qualifiedName: `symbol${index}`, kind: "function", line: 1, tabletIds: ["AA-VC-000123"] })),
+  });
+  const bounded = formatSymbolList(many);
+  assert.equal(bounded.total, 105);
+  assert.equal(bounded.shown, 100);
+  assert.match(bounded.text, /showing 100 of 105 symbols/);
+  assert.deepEqual(formatSymbolList({ ...context, symbols: [] }).text, "no symbol anchors are available in the active source context");
+  assert.match(formatSymbolList(undefined).error, /no active source context/);
 });
 
 test("extracts conservative navigation symbols without confusing comments or strings", async () => {
@@ -177,6 +215,13 @@ test("extension navigation returns text only and blocks a second source context 
   assert.equal(symbol.action, "transform");
   assert.equal(symbol.images, undefined);
   assert.match(symbol.text, /Source tablets: AA-VC-000123/);
+  const symbolsList = await handlers.get("input")({ source: "interactive", text: "@v --symbols" }, ctx);
+  assert.equal(symbolsList.action, "handled");
+  assert.equal(symbolsList.images, undefined);
+  assert.match(notifications.at(-1), /Executor\.run/);
+  const symbolsQuery = await handlers.get("input")({ source: "interactive", text: "@v --symbols executor" }, ctx);
+  assert.equal(symbolsQuery.action, "handled");
+  assert.equal(symbolsQuery.images, undefined);
   const second = await handlers.get("input")({ source: "interactive", text: "@v other.py -- question" }, ctx);
   assert.equal(second.action, "handled");
   assert.match(notifications.at(-1), /already has a source context/);
@@ -203,6 +248,9 @@ test("keeps two extension session contexts isolated and handles local navigation
   assert.equal(aTablet.action, "transform");
   const bForeign = await b.handlers.get("input")({ source: "interactive", text: "@v --tablet AA-VC-000001 -- B" }, ctx);
   assert.equal(bForeign.action, "handled");
+  assert.match(errors.at(-1), /no active source context/);
+  const bSymbols = await b.handlers.get("input")({ source: "interactive", text: "@v --symbols run" }, ctx);
+  assert.equal(bSymbols.action, "handled");
   assert.match(errors.at(-1), /no active source context/);
   const bSource = await b.handlers.get("session_start")({}, { sessionManager: { getBranch: () => [{ type: "custom", customType: "visual-context-source-context", data: b.data }] } });
   assert.equal(bSource, undefined);
