@@ -1,10 +1,11 @@
-import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { access, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { availableParallelism } from "node:os";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { getVisualProfile, type VisualProfile } from "./profile.ts";
 import { collectGitProvenance, type GitProvenance } from "./git.ts";
 import { extractAllSymbols, mapSymbolsToTablets, SYMBOL_INDEX_VERSION, type SymbolAnchor, type SymbolDiagnostic, type SymbolInput } from "./symbols.ts";
@@ -357,8 +358,12 @@ async function buildProvenanceMapping(input: RenderInput, value: Compacted, sour
   return contentIndex + 2;
 }
 
-async function queryProvenance(typstFile: string, sourceFile: string, mappingFile: string, fontDir: string, profile: VisualProfile): Promise<Map<string, number>> {
-  const args = ["query", typstFile, "metadata", "--root", root, "--font-path", fontDir, "--input", `source=../${sourceFile.slice(root.length + 1)}`, "--input", `mapping=../${mappingFile.slice(root.length + 1)}`,  "--input", `font=${profile.font}`, "--input", `cols=${profile.columns}`, "--input", `scale=${profile.scale}`, "--input", `size=${profile.fontSize}`, "--input", `leading=${profile.leading}`, "--input", `margin=${profile.sideMargin}`, "--input", `gutter=${profile.gutter}`];
+function typstInputPath(template: string, file: string): string {
+  return relative(dirname(template), file).split(sep).join("/");
+}
+
+async function queryProvenance(typstFile: string, sourceFile: string, mappingFile: string, fontDir: string, profile: VisualProfile, typstRoot: string): Promise<Map<string, number>> {
+  const args = ["query", typstFile, "metadata", "--root", typstRoot, "--font-path", fontDir, "--input", `source=${typstInputPath(typstFile, sourceFile)}`, "--input", `mapping=${typstInputPath(typstFile, mappingFile)}`,  "--input", `font=${profile.font}`,  "--input", `cols=${profile.columns}`, "--input", `scale=${profile.scale}`, "--input", `size=${profile.fontSize}`, "--input", `leading=${profile.leading}`, "--input", `margin=${profile.sideMargin}`, "--input", `gutter=${profile.gutter}`];
   const { stdout } = await run("typst", args);
   const values = JSON.parse(stdout) as { value?: string }[];
   const pages = new Map<string, number>();
@@ -476,8 +481,12 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       return { ...cached, sourceIdentities: identity.sourceIdentities, projectPrefix: projectContext.state.prefix };
     }
   }
-  const work = await mkdtemp(resolve(root, ".pi-visual-context-"));
+  const workRoot = resolve(options.workRoot ?? tmpdir());
+  await mkdir(workRoot, { recursive: true });
+  const work = await mkdtemp(resolve(workRoot, ".pi-visual-context-"));
   try {
+    const typstTemplate = resolve(work, "source.typ");
+    await copyFile(resolve(root, "typst/source.typ"), typstTemplate);
     const compactStarted = performance.now();
     const compacted: { input: RenderInput; value: Compacted }[] = [];
     for (let index = 0; index < inputs.length; index++) {
@@ -507,6 +516,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
     const languages = [...new Set(inputs.map((input) => input.language))];
     const language = languages.length === 1 ? languages[0] : "Mixed";
     const fontDir = resolve(root, "assets/fonts/romulus");
+    const typstRoot = work;
     const prepared = [] as { group: typeof groups[number]; work: string; pdf: string; pageCount: number; language: "Rust" | "C" | "Python" | "Text" | "Mixed"; fontsUsed: string[]; markers: ProvenanceMarker[]; provenancePages: Map<string, number> }[];
     let typstMs = 0;
     let pdfinfoMs = 0;
@@ -529,7 +539,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       const pdf = resolve(groupWork, "source.pdf");
       status(`laying out ${group.items.length} files · ${group.profile.name}`);
       const typstStarted = performance.now();
-      await run("typst", ["compile", "--root", root, "--font-path", fontDir, "--input", `source=../${combinedOutput.slice(root.length + 1)}`, "--input", `mapping=../${mappingFile.slice(root.length + 1)}`, "--input", `font=${group.profile.font}`, "--input", `cols=${group.profile.columns}`, "--input", `scale=${group.profile.scale}`, "--input", `size=${group.profile.fontSize}`, "--input", `leading=${group.profile.leading}`, "--input", `margin=${group.profile.sideMargin}`, "--input", `gutter=${group.profile.gutter}`, resolve(root, "typst/source.typ"), pdf]);
+      await run("typst", ["compile", "--root", typstRoot, "--font-path", fontDir, "--input", `source=${typstInputPath(typstTemplate, combinedOutput)}`, "--input", `mapping=${typstInputPath(typstTemplate, mappingFile)}`, "--input", `font=${group.profile.font}`,  "--input", `cols=${group.profile.columns}`, "--input", `scale=${group.profile.scale}`, "--input", `size=${group.profile.fontSize}`, "--input", `leading=${group.profile.leading}`, "--input", `margin=${group.profile.sideMargin}`, "--input", `gutter=${group.profile.gutter}`, typstTemplate, pdf]);
       typstMs += elapsedMs(typstStarted);
       const pdfInfoStarted = performance.now();
       const { stdout: pdfInfo } = await run("pdfinfo", [pdf]);
@@ -538,7 +548,7 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
       if (!pageCount) throw new Error(`renderer produced no PDF pages for ${group.profile.name}`);
       const fontsUsed = await readPdfFonts(pdf);
       const provenanceStarted = performance.now();
-      const provenancePages = await queryProvenance(resolve(root, "typst/source.typ"), combinedOutput, mappingFile, fontDir, group.profile);
+      const provenancePages = await queryProvenance(typstTemplate, combinedOutput, mappingFile, fontDir, group.profile, typstRoot);
       const provenanceMs = elapsedMs(provenanceStarted);
       timings.provenance = (timings.provenance ?? 0) + provenanceMs;
       prepared.push({ group, work: groupWork, pdf, pageCount, language: group.items.length === 1 ? group.items[0].input.language : language, fontsUsed, markers, provenancePages });

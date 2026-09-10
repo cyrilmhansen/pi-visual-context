@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -788,6 +788,30 @@ test("Python multiline strings use visual LF markers without changing literals",
   const second = join(dir, "strings-2.txt");
   execFileSync(pythonHelper, [source, second, font]);
   assert.deepEqual(readFileSync(output), readFileSync(second));
+});
+
+test("source rendering uses an explicit work root outside the runtime tree and cleans it", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-work-root-test-"));
+  const workRoot = join(dir, "work");
+  const cacheDirectory = join(dir, "cache");
+  const source = join(dir, "small.py");
+  writeFileSync(source, "value = 1\n");
+  const runtimeEntriesBefore = readdirSync(root).filter((name) => name.startsWith(".pi-visual-context-"));
+  const rendered = await renderSources([{ path: source, displayPath: "small.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory, workRoot });
+  assert.equal(rendered.images.length, 1);
+  assert.deepEqual(readdirSync(workRoot), []);
+  assert.deepEqual(readdirSync(root).filter((name) => name.startsWith(".pi-visual-context-")), runtimeEntriesBefore);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("failed source rendering cleans an explicit work root", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-visual-work-root-failure-test-"));
+  const workRoot = join(dir, "work");
+  const source = join(dir, "small.py");
+  writeFileSync(source, "value = 1\n");
+  await assert.rejects(() => renderSources([{ path: source, displayPath: "small.py", language: "Python" }], () => {}, getVisualProfile("normal"), { cacheDirectory: join(dir, "cache"), workRoot, beforeRasterize: async () => false }), RenderCancelled);
+  assert.deepEqual(readdirSync(workRoot), []);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("tablet confirmation can cancel after PDF layout before rasterization", async () => {

@@ -16,8 +16,9 @@ test("headless CLI prepares a portable bundle and resolves it without Pi or sour
   const dir = mkdtempSync(join(tmpdir(), "pvc-cli-"));
   const source = join(dir, "sample.py");
   const bundle = join(dir, "bundle");
+  const workRoot = join(dir, "work");
   cpSync(join(root, "tests/fixtures/sample.py"), source);
-  const prepare = await spawn(["prepare", "--cwd", dir, "--output", bundle, "sample.py"], dir);
+  const prepare = await spawn(["prepare", "--cwd", dir, "--output", bundle, "--work-root", workRoot, "sample.py"], dir);
   assert.equal(prepare.status, 0, prepare.stderr);
   const snapshot = JSON.parse(prepare.stdout);
   assert.equal(prepare.stdout.trim().startsWith("{"), true);
@@ -26,6 +27,7 @@ test("headless CLI prepares a portable bundle and resolves it without Pi or sour
   assert.ok(snapshot.artifacts.every((artifact) => artifact.relativePath?.startsWith("artifacts/")));
   assert.ok(snapshot.artifacts.every((artifact) => existsSync(join(bundle, artifact.relativePath))));
   assert.ok(readdirSync(join(bundle, "artifacts")).length >= 1);
+  assert.deepEqual(readdirSync(workRoot), []);
   const tablet = snapshot.tablets[0].id;
   const resolved = await spawn(["resolve-tablet", "--snapshot", join(bundle, "snapshot.json"), tablet], "/");
   assert.equal(resolved.status, 0, resolved.stderr);
@@ -37,7 +39,7 @@ test("headless CLI prepares a portable bundle and resolves it without Pi or sour
   const symbols = await spawn(["symbols", "--snapshot", join(bundle, "snapshot.json"), "compute"], "/");
   assert.equal(symbols.status, 0, symbols.stderr);
   assert.equal(JSON.parse(symbols.stdout).symbols.length >= 1, true);
-  const overwrite = spawn(["prepare", "--cwd", dir, "--output", bundle, "sample.py"], dir);
+  const overwrite = spawn(["prepare", "--cwd", dir, "--output", bundle, "--work-root", workRoot, "sample.py"], dir);
   assert.notEqual(overwrite.status, 0);
   assert.match(overwrite.stderr, /output already exists/);
   rmSync(source, { force: true });

@@ -15,6 +15,7 @@ export type SourceContextOptions = {
   beforeRasterize?: RenderOptions["beforeRasterize"];
   onCacheHit?: RenderOptions["onCacheHit"];
   cacheDirectory?: string;
+  workRoot?: string;
 };
 
 export type SourceContext = {
@@ -51,6 +52,7 @@ export async function prepareSourceContext(options: SourceContextOptions): Promi
     onCacheHit: options.onCacheHit,
     cacheDirectory: options.cacheDirectory,
     projectRoot: options.cwd,
+    workRoot: options.workRoot,
     readMs: expansionMs,
   });
   const portable = buildSourceContextSnapshot(rendered.manifest, rendered.sourceIdentities.map((identity, index) => ({ input: inputs[index], contentSha256: identity.contentSha256, byteLength: identity.byteLength, codec: identity.codec })), rendered.images, rendered.projectPrefix);
