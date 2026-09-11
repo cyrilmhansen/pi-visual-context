@@ -107,7 +107,8 @@ async function prepare(args: string[], io: CliIO): Promise<SourceContextSnapshot
 export async function runCli(argv: string[], io: CliIO): Promise<number> {
   try {
     const [command, ...args] = argv;
-    if (command === "prepare") io.stdout(json(await prepare(args, io)));
+    if (command === "probe") io.stdout(json({ schema: "pi-visual-context-probe/1", status: "ok" }));
+    else if (command === "prepare") io.stdout(json(await prepare(args, io)));
     else if (command === "resolve-tablet") {
       const snapshot = await readSourceContextSnapshot(valueAfter(args, "--snapshot"));
       const id = positional(args, ["--snapshot"])[0];
@@ -123,7 +124,7 @@ export async function runCli(argv: string[], io: CliIO): Promise<number> {
       const query = positional(args, ["--snapshot"])[0];
       const result = searchSnapshotSymbols(snapshot, query, DEFAULT_SYMBOL_LIMIT);
       io.stdout(json({ query: query ?? null, ...result }));
-    } else throw new CliError("usage: pvc prepare|resolve-tablet|resolve-symbol|symbols");
+    } else throw new CliError("usage: pvc probe|prepare|resolve-tablet|resolve-symbol|symbols");
     return 0;
   } catch (error) {
     io.stderr(`${error instanceof Error ? error.message : String(error)}\n`);

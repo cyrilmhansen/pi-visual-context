@@ -12,6 +12,13 @@ function spawn(args, cwd) {
   return spawnSync(process.execPath, [cli, ...args], { cwd, encoding: "utf8" });
 }
 
+test("headless CLI exposes a deterministic side-effect-free probe", () => {
+  const result = spawn(["probe"], "/");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, '{"schema":"pi-visual-context-probe/1","status":"ok"}\n');
+});
+
 test("headless CLI prepares a portable bundle and resolves it without Pi or sources", async () => {
   const dir = mkdtempSync(join(tmpdir(), "pvc-cli-"));
   const source = join(dir, "sample.py");
