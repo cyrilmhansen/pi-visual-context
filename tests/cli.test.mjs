@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -54,6 +54,40 @@ test("headless CLI prepares a portable bundle and resolves it without Pi or sour
   const afterDeletion = await spawn(["symbols", "--snapshot", join(bundle, "snapshot.json")], "/");
   assert.equal(afterDeletion.status, 0, afterDeletion.stderr);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("headless prepare keeps project state outside a read-only source project", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pvc-cli-readonly-"));
+  const project = join(dir, "project");
+  const scratch = join(dir, "scratch");
+  const bundle = join(scratch, "bundle");
+  const workRoot = join(scratch, "work");
+  const stateRoot = join(scratch, "state");
+
+  mkdirSync(project);
+  mkdirSync(scratch);
+  cpSync(join(root, "tests/fixtures/sample.py"), join(project, "sample.py"));
+  chmodSync(project, 0o555);
+
+  try {
+    const prepare = spawn([
+      "prepare",
+      "--cwd", project,
+      "--output", bundle,
+      "--work-root", workRoot,
+      "--state-root", stateRoot,
+      "sample.py",
+    ], "/");
+
+    assert.equal(prepare.status, 0, prepare.stderr);
+    assert.equal(existsSync(join(project, ".pi")), false);
+    assert.equal(existsSync(join(stateRoot, "project.json")), true);
+    assert.equal(existsSync(join(bundle, "snapshot.json")), true);
+    assert.ok(readdirSync(join(bundle, "artifacts")).length >= 1);
+  } finally {
+    chmodSync(project, 0o755);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("headless CLI rejects invalid snapshots before resolution", async () => {

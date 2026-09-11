@@ -448,8 +448,9 @@ export async function renderSources(inputs: RenderInput[], status: (text: string
   const gitState = options.git ? { provenance: options.git, repositoryIds: options.gitRepositoryIds ?? inputs.map(() => null) } : await collectGitProvenance(inputs.map((input) => input.path));
   const fallbackProjectRoot = options.projectRoot;
   const projectRoot = gitState.provenance.repositories.length === 1 ? gitState.provenance.repositories[0].root : fallbackProjectRoot;
-  const cacheDirectory = options.cacheDirectory ?? resolve(projectRoot ?? root, ".pi", "visual-context", "cache");
-  const projectContext = await loadProjectContext({ projectRoot, cacheDirectory });
+  const stateRoot = options.stateRoot ? resolve(options.stateRoot) : resolve(projectRoot ?? root, ".pi", "visual-context");
+  const cacheDirectory = options.cacheDirectory ?? resolve(stateRoot, "cache");
+  const projectContext = await loadProjectContext({ projectRoot, cacheDirectory, stateRoot });
   const identity = await cacheKey(inputs, profile, projectContext.state.prefix);
   const timings: Record<string, number> = { read: Math.round(((options.readMs ?? 0) + elapsedMs(readStarted)) * 100) / 100 };
   const key = identity.key;

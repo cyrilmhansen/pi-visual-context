@@ -20,6 +20,6 @@ export class RenderCancelled extends Error { constructor() { super("render cance
 export type RenderOptions = {
   beforeRasterize?: (pageCount: number, sourceChars: number) => Promise<boolean>;
   onCacheHit?: (pageCount: number, sourceChars: number) => Promise<boolean>;
-  cacheDirectory?: string; projectRoot?: string; workRoot?: string; readMs?: number; git?: GitProvenance; gitRepositoryIds?: (number | null)[];
+  cacheDirectory?: string; projectRoot?: string; workRoot?: string; stateRoot?: string; readMs?: number; git?: GitProvenance; gitRepositoryIds?: (number | null)[];
 };
 export type PdfRenderResult = { images: Buffer[]; pageDimensions: { width: number; height: number }[]; finalPage: { width: number; height: number; columnsUsed: number; croppedRightPixels: number; croppedBottomPixels: number }; workers: number };

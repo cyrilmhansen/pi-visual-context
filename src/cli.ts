@@ -93,12 +93,13 @@ async function prepare(args: string[], io: CliIO): Promise<SourceContextSnapshot
   const cwd = resolve(valueAfter(args, "--cwd"));
   const output = valueAfter(args, "--output");
   const workRoot = args.includes("--work-root") ? resolve(cwd, valueAfter(args, "--work-root")) : undefined;
+  const stateRoot = args.includes("--state-root") ? resolve(cwd, valueAfter(args, "--state-root")) : undefined;
   const profile = args.includes("--profile") ? valueAfter(args, "--profile") : "normal";
   if (!["normal", "conservative"].includes(profile)) throw new CliError(`unknown profile: ${profile}`);
-  const sources = positional(args, ["--cwd", "--output", "--work-root", "--profile"]);
+  const sources = positional(args, ["--cwd", "--output", "--work-root", "--state-root", "--profile"]);
   if (!sources.length) throw new CliError("prepare requires at least one source");
   await ensureAbsent(output);
-  const result = await prepareSourceContext({ cwd, sources, profile, workRoot, onProgress: (text) => io.stderr(`${text}\n`), confirmSources: async () => true });
+  const result = await prepareSourceContext({ cwd, sources, profile, workRoot, stateRoot, onProgress: (text) => io.stderr(`${text}\n`), confirmSources: async () => true });
   if (!result) throw new CliError("source preparation cancelled");
   const snapshot = await materializeBundle(output, result.snapshot, result.artifactPayloads);
   return snapshot;

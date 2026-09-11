@@ -100,9 +100,10 @@ function projectRootFromCache(cacheDirectory: string): string {
   return parent;
 }
 
-export async function loadProjectContext(options: { projectRoot?: string; cacheDirectory: string }): Promise<ProjectContext> {
+export async function loadProjectContext(options: { projectRoot?: string; cacheDirectory: string; stateRoot?: string }): Promise<ProjectContext> {
   const projectRoot = resolve(options.projectRoot ?? projectRootFromCache(options.cacheDirectory));
-  const statePath = resolve(projectRoot, ".pi", "visual-context", "project.json");
+  const stateRoot = resolve(options.stateRoot ?? resolve(projectRoot, ".pi", "visual-context"));
+  const statePath = resolve(stateRoot, "project.json");
   const lockPath = `${statePath}.lock`;
   const existing = await readState(statePath);
   if (existing) return { statePath, cacheDirectory: options.cacheDirectory, state: existing };
